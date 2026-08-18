@@ -238,63 +238,202 @@ def cdp_targets(port: int) -> List[dict]:
 def _cookie_probe_urls() -> List[str]:
     urls: List[str] = []
     for host in MC_HOSTS:
-        urls.extend([host, host + "/", host + "/console/tasks", host + "/console", host + "/login"])
+        urls.extend(
+            [
+                host,
+                host + "/",
+                host + "/console/tasks",
+                host + "/console",
+                host + "/login",
+                host + "/api/v1/users/status",
+            ]
+        )
     return urls
 
 
-def get_session_cookie(port: int) -> Optional[str]:
+def _is_session_cookie_name(name: str) -> bool:
+    n = (name or "").lower().strip()
+    if not n:
+        return False
+    if n == COOKIE_NAME:
+        return True
+    # tolerate renames / prefixes
+    aliases = (
+        "monkeycode_ai_session",
+        "monkeycode_session",
+        "mc_session",
+        "mc_ai_session",
+        "ohmyagent_session",
+    )
+    if n in aliases:
+        return True
+    if "session" in n and ("monkey" in n or "ohmy" in n or n.endswith("_session")):
+        return True
+    return False
+
+
+def _pick_session_value(cookies: List[dict]) -> Optional[str]:
+    ranked: List[Tuple[int, dict]] = []
+    for c in cookies:
+        name = str(c.get("name") or "")
+        val = str(c.get("value") or "").strip()
+        if not val or not _is_session_cookie_name(name):
+            continue
+        domain = str(c.get("domain") or "").lower()
+        score = 0
+        if name.lower() == COOKIE_NAME:
+            score += 5
+        if "monkeycode-ai.com" in domain:
+            score += 3
+        elif "monkeycode-ai.net" in domain:
+            score += 2
+        elif "monkeycode" in domain:
+            score += 1
+        if len(val) >= 20:
+            score += 1
+        ranked.append((score, c))
+    ranked.sort(key=lambda x: x[0], reverse=True)
+    if ranked:
+        return str(ranked[0][1].get("value") or "").strip() or None
+    return None
+
+
+def _collect_cookies_via_ws(ws: SimpleWS) -> List[dict]:
+    cookies: List[dict] = []
+    # Enable domains (ignore failures on older/newer Chrome)
+    for method in ("Network.enable", "Storage.enable", "Page.enable"):
+        try:
+            ws.call(method, timeout=3.0)
+        except Exception:
+            pass
+
+    # 1) all cookies (still works on many Chrome builds)
+    for method, params in (
+        ("Network.getAllCookies", None),
+        ("Network.getCookies", {"urls": _cookie_probe_urls()}),
+        ("Storage.getCookies", None),
+    ):
+        try:
+            res = ws.call(method, params, timeout=5.0)
+            part = res.get("cookies") or []
+            if isinstance(part, list) and part:
+                cookies.extend(part)
+        except Exception:
+            continue
+
+    # 2) document.cookie fallback (non-HttpOnly only)
+    try:
+        res = ws.call(
+            "Runtime.evaluate",
+            {
+                "expression": "(() => { try { return document.cookie || ''; } catch (e) { return ''; } })()",
+                "returnByValue": True,
+            },
+            timeout=5.0,
+        )
+        raw = ((res.get("result") or {}).get("value")) or ""
+        if isinstance(raw, str) and raw.strip():
+            for part in raw.split(";"):
+                part = part.strip()
+                if "=" not in part:
+                    continue
+                k, v = part.split("=", 1)
+                cookies.append({"name": k.strip(), "value": v.strip(), "domain": "document.cookie"})
+    except Exception:
+        pass
+    return cookies
+
+
+def probe_session_cookie(port: int) -> Dict[str, Any]:
+    """
+    Probe CDP for session cookie.
+    Returns {ok, session, page_url, cookie_names, error, method}
+    """
+    out: Dict[str, Any] = {
+        "ok": False,
+        "session": None,
+        "page_url": "",
+        "cookie_names": [],
+        "error": "",
+        "method": "",
+    }
     targets = cdp_targets(port)
+    pages = [t for t in targets if t.get("type") == "page"]
     page = None
-    for t in targets:
+    for t in pages:
         url = (t.get("url") or "").lower()
-        if t.get("type") == "page" and ("monkeycode" in url or "monkeycode-ai.com" in url or "monkeycode-ai.net" in url):
+        if "monkeycode" in url or "monkeycode-ai.com" in url or "monkeycode-ai.net" in url:
             page = t
             break
-    if not page:
-        for t in targets:
-            if t.get("type") == "page":
-                page = t
-                break
-    ws_url = (page or {}).get("webSocketDebuggerUrl")
-    if not ws_url:
-        ver = cdp_version(port) or {}
-        ws_url = ver.get("webSocketDebuggerUrl")
-    if not ws_url:
-        return None
+    if not page and pages:
+        page = pages[0]
+    out["page_url"] = str((page or {}).get("url") or "")[:200]
+
+    candidates: List[Tuple[str, str]] = []
+    if page and page.get("webSocketDebuggerUrl"):
+        candidates.append(("page", str(page["webSocketDebuggerUrl"])))
+    ver = cdp_version(port) or {}
+    if ver.get("webSocketDebuggerUrl"):
+        candidates.append(("browser", str(ver["webSocketDebuggerUrl"])))
+    # any other page targets
+    for t in pages:
+        wu = t.get("webSocketDebuggerUrl")
+        if wu and ("page", str(wu)) not in candidates:
+            candidates.append(("page-other", str(wu)))
+
+    if not candidates:
+        out["error"] = "no cdp websocket"
+        return out
+
     origin = f"http://127.0.0.1:{port}"
-    ws = SimpleWS(ws_url, origin=origin, timeout=5)
-    try:
-        cookies: List[dict] = []
+    all_cookies: List[dict] = []
+    last_err = ""
+    for method_tag, ws_url in candidates:
+        # SimpleWS only speaks plain ws://
+        if ws_url.startswith("wss://"):
+            last_err = "wss not supported"
+            continue
+        if ws_url.startswith("ws://"):
+            pass
+        elif ws_url.startswith("http://"):
+            ws_url = "ws://" + ws_url[len("http://") :]
         try:
-            res = ws.call("Network.getCookies", {"urls": _cookie_probe_urls()})
-            cookies = list(res.get("cookies") or [])
-        except Exception:
-            try:
-                res = ws.call("Storage.getCookies")
-                cookies = list(res.get("cookies") or [])
-            except Exception:
-                cookies = []
-        # Prefer cookie whose domain matches known hosts (.com first)
-        ranked: List[Tuple[int, dict]] = []
-        for c in cookies:
-            if c.get("name") != COOKIE_NAME or not c.get("value"):
-                continue
-            domain = str(c.get("domain") or "").lower()
-            if "monkeycode-ai.com" in domain:
-                score = 2
-            elif "monkeycode-ai.net" in domain:
-                score = 1
-            elif "monkeycode" in domain:
-                score = 1
-            else:
-                score = 0
-            ranked.append((score, c))
-        ranked.sort(key=lambda x: x[0], reverse=True)
-        if ranked:
-            return str(ranked[0][1].get("value"))
-        return None
-    finally:
-        ws.close()
+            ws = SimpleWS(ws_url, origin=origin, timeout=5)
+        except Exception as e:
+            last_err = f"ws connect {method_tag}: {e}"
+            continue
+        try:
+            part = _collect_cookies_via_ws(ws)
+            if part:
+                all_cookies.extend(part)
+                out["method"] = method_tag
+        except Exception as e:
+            last_err = f"collect {method_tag}: {e}"
+        finally:
+            ws.close()
+
+    # unique names for UI
+    names = []
+    seen = set()
+    for c in all_cookies:
+        n = str(c.get("name") or "")
+        if n and n not in seen:
+            seen.add(n)
+            names.append(n)
+    out["cookie_names"] = names[:30]
+
+    session = _pick_session_value(all_cookies)
+    if session:
+        out["ok"] = True
+        out["session"] = session
+        return out
+
+    out["error"] = last_err or ("no session cookie; saw: " + (",".join(names[:12]) if names else "(none)"))
+    return out
+
+
+def get_session_cookie(port: int) -> Optional[str]:
+    return probe_session_cookie(port).get("session")
 
 
 def kill_process_tree(proc: subprocess.Popen) -> None:
@@ -373,6 +512,9 @@ class AuthJob:
     debug_port: int = 0
     profile_dir: str = ""
     chrome_path: str = ""
+    page_url: str = ""
+    cookie_names: str = ""
+    probe_count: int = 0
     _proc: Optional[subprocess.Popen] = field(default=None, repr=False)
     _thread: Optional[threading.Thread] = field(default=None, repr=False)
     _stop: threading.Event = field(default_factory=threading.Event, repr=False)
@@ -388,6 +530,9 @@ class AuthJob:
             "account_id": self.account_id,
             "error": self.error,
             "debug_port": self.debug_port,
+            "page_url": self.page_url,
+            "cookie_names": self.cookie_names,
+            "probe_count": self.probe_count,
         }
 
 
@@ -510,9 +655,14 @@ class ManualAuthManager:
                 self._set(job, "error", "Chrome 调试端口未就绪", error="cdp timeout")
                 return
 
-            self._set(job, "waiting_login", "请在弹出的 Chrome 窗口完成上游登录授权…")
+            self._set(
+                job,
+                "waiting_login",
+                f"请在弹出的 Chrome 完成登录（打开 {MC_HOST}）。登录成功后不要关窗，等待自动检测…",
+            )
             deadline = time.time() + self.timeout
             session = None
+            last_detail = ""
             while time.time() < deadline:
                 if job._stop.is_set():
                     self._set(job, "cancelled", "已取消")
@@ -522,16 +672,40 @@ class ManualAuthManager:
                     self._set(job, "error", "Chrome 已关闭，未完成授权", error="chrome closed")
                     return
                 try:
-                    session = get_session_cookie(job.debug_port)
+                    probe = probe_session_cookie(job.debug_port)
                 except Exception as e:
                     log(f"cookie poll: {e}")
-                    session = None
+                    probe = {"ok": False, "session": None, "error": str(e), "page_url": "", "cookie_names": []}
+                job.probe_count = int(job.probe_count or 0) + 1
+                job.page_url = str(probe.get("page_url") or "")
+                names = probe.get("cookie_names") or []
+                if isinstance(names, list):
+                    job.cookie_names = ",".join(str(x) for x in names[:15])
+                session = probe.get("session") if probe.get("ok") else None
                 if session:
+                    log(f"session cookie found via {probe.get('method')} page={job.page_url}")
                     break
+                detail = str(probe.get("error") or "")
+                # refresh UI every few probes
+                if job.probe_count == 1 or job.probe_count % 3 == 0 or detail != last_detail:
+                    last_detail = detail
+                    page = job.page_url or "(未检测到页面)"
+                    names_s = job.cookie_names or "(无cookie)"
+                    self._set(
+                        job,
+                        "waiting_login",
+                        f"等待登录中… 第{job.probe_count}次探测 | 页面: {page[:80]} | cookies: {names_s[:100]}",
+                    )
                 time.sleep(POLL_SEC)
 
             if not session:
-                self._set(job, "timeout", "等待登录超时", error="timeout")
+                self._set(
+                    job,
+                    "timeout",
+                    f"等待登录超时。最后页面: {job.page_url or '-'}；cookies: {job.cookie_names or '(无)'}。"
+                    f"请确认已在弹窗 Chrome 登录成功，或改用下方 Session 签发。",
+                    error="timeout",
+                )
                 return
 
             self._set(job, "minting", "已检测到登录，正在签发凭证并入库…")

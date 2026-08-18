@@ -77,8 +77,20 @@ _proxy_state: Dict[str, Any] = {
 }
 
 
+_log_file_lock = threading.Lock()
+
+
 def log(msg: str) -> None:
-    print(f"[mc2api] {msg}", flush=True)
+    line = f"[mc2api] {msg}"
+    print(line, flush=True)
+    # Always append to data/server.log so Windows start.bat also has logs
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with _log_file_lock:
+            with open(DATA_DIR / "server.log", "a", encoding="utf-8") as fp:
+                fp.write(line + "\n")
+    except Exception:
+        pass
 
 
 def now() -> float:

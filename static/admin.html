@@ -889,7 +889,15 @@ async function pollAuthJob(jobId) {
     const r = await api('/admin/api/accounts/manual-auth/status?id=' + encodeURIComponent(jobId));
     const job = r.job || {};
     const st = job.state || '';
-    setMsg($('authMsg'), job.message || st, st === 'done');
+    let msg = job.message || st;
+    if (st === 'waiting_login' && (job.page_url || job.cookie_names)) {
+      // message already contains probe detail from server
+      msg = job.message || msg;
+    }
+    if (job.error && ['error', 'timeout'].includes(st)) {
+      msg = (job.message || st) + (job.error ? `（${job.error}）` : '');
+    }
+    setMsg($('authMsg'), msg, st === 'done');
     if (['done', 'error', 'timeout', 'cancelled'].includes(st)) {
       clearInterval(authState.timer);
       authState.timer = null;
