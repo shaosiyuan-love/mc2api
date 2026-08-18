@@ -1,0 +1,950 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>mc2api</title>
+<style>
+  :root {
+    --radius: 0.5rem;
+    --background: oklch(0.995 0 0);
+    --foreground: oklch(0.145 0 0);
+    --card: oklch(0.975 0.002 90);
+    --card-foreground: oklch(0.145 0 0);
+    --primary: oklch(0.12 0 0);
+    --primary-foreground: oklch(0.985 0 0);
+    --secondary: oklch(0.965 0.002 90);
+    --secondary-foreground: oklch(0.2 0 0);
+    --muted: oklch(0.965 0.002 90);
+    --muted-foreground: oklch(0.55 0 0);
+    --accent: oklch(0.95 0.003 90);
+    --accent-foreground: oklch(0.16 0 0);
+    --destructive: oklch(0.58 0.22 27);
+    --border: oklch(0.91 0 0);
+    --input: oklch(0.9 0 0);
+    --ring: oklch(0.2 0 0);
+    --sidebar: oklch(0.995 0 0);
+    --sidebar-foreground: oklch(0.18 0 0);
+    --sidebar-border: oklch(0.93 0 0);
+    --success: oklch(0.55 0.14 155);
+    --warn: oklch(0.72 0.14 75);
+    --font: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Noto Sans SC", sans-serif;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    --sidebar-w: 232px;
+  }
+  html.dark {
+    color-scheme: dark;
+    --background: oklch(0.13 0 0);
+    --foreground: oklch(0.95 0 0);
+    --card: oklch(0.18 0 0);
+    --card-foreground: oklch(0.95 0 0);
+    --primary: oklch(0.96 0 0);
+    --primary-foreground: oklch(0.12 0 0);
+    --secondary: oklch(0.21 0 0);
+    --secondary-foreground: oklch(0.94 0 0);
+    --muted: oklch(0.21 0 0);
+    --muted-foreground: oklch(0.64 0 0);
+    --accent: oklch(0.24 0 0);
+    --accent-foreground: oklch(0.96 0 0);
+    --destructive: oklch(0.65 0.2 28);
+    --border: oklch(0.27 0 0);
+    --input: oklch(0.3 0 0);
+    --ring: oklch(0.75 0 0);
+    --sidebar: oklch(0.145 0 0);
+    --sidebar-foreground: oklch(0.92 0 0);
+    --sidebar-border: oklch(0.25 0 0);
+    --success: oklch(0.72 0.13 155);
+    --warn: oklch(0.8 0.13 80);
+  }
+  * { box-sizing: border-box; border-color: var(--border); }
+  * { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+  *::-webkit-scrollbar { width: 5px; height: 5px; }
+  *::-webkit-scrollbar-thumb { border-radius: 5px; background: var(--border); }
+  html, body { height: 100%; min-height: 100%; }
+  body {
+    margin: 0;
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font);
+    font-size: 14px;
+    text-rendering: optimizeLegibility;
+  }
+  ::selection { background: color-mix(in oklab, var(--primary) 24%, transparent); }
+  :focus-visible { outline: 1px solid var(--ring); outline-offset: 1px; }
+
+  .app {
+    display: grid;
+    grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+    height: 100vh;
+    overflow: hidden;
+  }
+  .sidebar {
+    border-right: 1px solid var(--sidebar-border);
+    background: var(--sidebar);
+    color: var(--sidebar-foreground);
+    padding: 16px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    min-height: 0;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; padding: 4px 8px 8px; }
+  .brand-mark {
+    width: 28px; height: 28px; border-radius: 8px;
+    background: var(--primary); color: var(--primary-foreground);
+    display: grid; place-items: center; font-size: 12px; font-weight: 650;
+  }
+  .brand-title { font-size: 14px; font-weight: 600; line-height: 1.2; }
+  .brand-sub { font-size: 11px; color: var(--muted-foreground); margin-top: 2px; }
+
+  .nav { display: flex; flex-direction: column; gap: 2px; }
+  .nav button {
+    display: flex; align-items: center; gap: 8px;
+    height: 32px; padding: 0 10px; border: 0; border-radius: 6px;
+    background: transparent; color: var(--muted-foreground);
+    font: inherit; font-size: 12px; text-align: left; cursor: pointer;
+    transition: background .15s, color .15s;
+  }
+  .nav button:hover { background: color-mix(in oklab, var(--secondary) 55%, transparent); color: var(--foreground); }
+  .nav button.is-active { background: color-mix(in oklab, var(--secondary) 60%, transparent); color: var(--foreground); }
+
+  .sidebar-foot {
+    margin-top: auto; display: flex; flex-direction: column; gap: 8px;
+    padding: 8px; border-top: 1px solid var(--sidebar-border);
+  }
+  .token-box label { display: block; font-size: 11px; color: var(--muted-foreground); margin-bottom: 6px; }
+
+  .main { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    min-height: 56px; padding: 12px 24px; flex-shrink: 0;
+    background: color-mix(in oklab, var(--background) 88%, transparent);
+    backdrop-filter: blur(10px); border-bottom: 1px solid var(--border);
+  }
+  .page-title { font-size: 20px; font-weight: 500; line-height: 28px; margin: 0; }
+  .page-sub { margin: 2px 0 0; font-size: 12px; color: var(--muted-foreground); }
+  .top-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+
+  .content {
+    flex: 1; min-height: 0; overflow: auto;
+    width: 100%;
+  }
+  .content-inner {
+    width: min(1120px, 100%);
+    margin: 0 auto;
+    padding: 20px 24px 40px;
+  }
+
+  .tab-panel { display: none; }
+  .tab-panel.is-active { display: block; }
+
+  .stack { display: flex; flex-direction: column; gap: 16px; }
+  .stack-sm { display: flex; flex-direction: column; gap: 10px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+
+  .metrics {
+    display: grid; gap: 8px;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+  .metric {
+    background: var(--card); color: var(--card-foreground);
+    border-radius: 8px; padding: 14px 16px; min-height: 92px;
+  }
+  .metric-label { color: var(--muted-foreground); font-size: 12px; margin-bottom: 10px; }
+  .metric-value { font-size: 24px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.15; }
+  .metric-detail { margin-top: 6px; font-size: 12px; color: var(--muted-foreground); }
+
+  .panel {
+    background: var(--card); color: var(--card-foreground);
+    border-radius: 8px; padding: 16px 18px 18px;
+  }
+  .panel-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    min-height: 32px; margin-bottom: 14px;
+  }
+  .panel-title { margin: 0; font-size: 14px; font-weight: 500; }
+  .panel-desc { margin: 0 0 12px; font-size: 12px; color: var(--muted-foreground); line-height: 1.5; }
+  .panel-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+
+  input[type="text"], input[type="password"], textarea, select {
+    width: 100%; min-width: 0; height: 32px;
+    border: 1px solid var(--input); background: var(--background); color: var(--foreground);
+    border-radius: 999px; padding: 0 12px; font: inherit; font-size: 12px; outline: none;
+  }
+  textarea {
+    height: auto; min-height: 84px; border-radius: 12px; padding: 10px 12px;
+    resize: vertical; line-height: 1.45;
+  }
+  input:focus, textarea:focus, select:focus {
+    border-color: color-mix(in oklab, var(--ring) 55%, var(--input));
+  }
+
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    height: 32px; padding: 0 12px; border-radius: 999px; border: 1px solid transparent;
+    background: var(--primary); color: var(--primary-foreground);
+    font: inherit; font-size: 12px; font-weight: 500; cursor: pointer; white-space: nowrap;
+  }
+  .btn:hover { background: color-mix(in oklab, var(--primary) 84%, transparent); }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .btn-secondary { background: var(--secondary); color: var(--secondary-foreground); }
+  .btn-secondary:hover { background: color-mix(in oklab, var(--secondary) 80%, transparent); }
+  .btn-outline { background: var(--background); color: var(--foreground); border-color: var(--input); }
+  .btn-outline:hover { background: var(--accent); }
+  .btn-danger { background: var(--destructive); color: #fff; }
+  .btn-danger:hover { background: color-mix(in oklab, var(--destructive) 90%, black); }
+  .btn-icon { width: 32px; padding: 0; }
+
+  .gateway-box {
+    border: 1px solid var(--border); background: var(--background);
+    border-radius: 12px; padding: 12px 14px; font-size: 12px; line-height: 1.7;
+  }
+  .gateway-line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  code, .mono { font-family: var(--mono); font-size: 12px; }
+  .muted { color: var(--muted-foreground); }
+  .msg { min-height: 18px; font-size: 12px; color: var(--muted-foreground); }
+  .msg.is-ok { color: var(--success); }
+  .msg.is-err { color: var(--destructive); }
+
+  .table-wrap {
+    overflow: auto; border: 1px solid var(--border); border-radius: 12px; background: var(--background);
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th {
+    color: var(--muted-foreground); font-weight: 500;
+    background: color-mix(in oklab, var(--muted) 55%, transparent);
+    position: sticky; top: 0;
+  }
+  tr:last-child td { border-bottom: 0; }
+  tbody tr:hover td { background: color-mix(in oklab, var(--accent) 55%, transparent); }
+  .tag {
+    display: inline-flex; align-items: center; height: 22px; padding: 0 8px;
+    border-radius: 999px; font-size: 11px; font-weight: 500;
+    background: var(--secondary); color: var(--secondary-foreground);
+  }
+  .tag.is-on { background: color-mix(in oklab, var(--success) 16%, transparent); color: var(--success); }
+  .tag.is-off { background: color-mix(in oklab, var(--destructive) 14%, transparent); color: var(--destructive); }
+  .tag.is-cool { background: color-mix(in oklab, var(--warn) 18%, transparent); color: var(--warn); }
+  .actions { display: flex; flex-wrap: wrap; gap: 6px; }
+
+  .split-2 {
+    display: grid;
+    grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
+    gap: 16px;
+    align-items: start;
+  }
+
+  @media (max-width: 960px) {
+    .app { grid-template-columns: 1fr; height: auto; overflow: visible; }
+    .sidebar { border-right: 0; border-bottom: 1px solid var(--sidebar-border); }
+    .main { overflow: visible; }
+    .content { overflow: visible; }
+    .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .split-2 { grid-template-columns: 1fr; }
+    .content-inner { padding: 16px; }
+  }
+  @media (max-width: 640px) {
+    .metrics { grid-template-columns: 1fr; }
+    .topbar { padding: 12px 16px; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">MC</div>
+      <div>
+        <div class="brand-title">mc2api</div>
+        <div class="brand-sub">本地网关</div>
+      </div>
+    </div>
+    <nav class="nav" id="nav">
+      <button type="button" data-tab="overview" class="is-active">概览</button>
+      <button type="button" data-tab="gateway">网关 &amp; API Key</button>
+      <button type="button" data-tab="accounts">号池</button>
+      <button type="button" data-tab="proxy">代理出口</button>
+      <button type="button" data-tab="logs">请求日志</button>
+    </nav>
+    <div class="sidebar-foot">
+      <div class="row">
+        <button class="btn btn-outline btn-icon" id="btnTheme" type="button" title="切换主题">◐</button>
+        <span class="muted" style="font-size:11px">mc2api 本地管理，无需 Token</span>
+      </div>
+    </div>
+  </aside>
+
+  <div class="main">
+    <div class="topbar">
+      <div>
+        <h1 class="page-title" id="pageTitle">概览</h1>
+        <p class="page-sub" id="pageSub">运行状态与资源概览</p>
+      </div>
+      <div class="top-actions">
+        <button class="btn btn-outline" id="btnRefresh" type="button">刷新</button>
+      </div>
+    </div>
+
+    <div class="content">
+      <div class="content-inner">
+
+        <!-- Tab: 概览 -->
+        <section class="tab-panel is-active" data-panel="overview">
+          <div class="stack">
+            <div class="metrics">
+              <div class="metric">
+                <div class="metric-label">号池总数</div>
+                <div class="metric-value" id="sAcc">-</div>
+                <div class="metric-detail" id="sAccDetail">accounts</div>
+              </div>
+              <div class="metric">
+                <div class="metric-label">可用账号</div>
+                <div class="metric-value" id="sEn">-</div>
+                <div class="metric-detail" id="sEnDetail">enabled</div>
+              </div>
+              <div class="metric">
+                <div class="metric-label">客户端 Key</div>
+                <div class="metric-value" id="sKeys">-</div>
+                <div class="metric-detail">enabled keys</div>
+              </div>
+              <div class="metric">
+                <div class="metric-label">24h 请求</div>
+                <div class="metric-value" id="sReq">-</div>
+                <div class="metric-detail" id="sReqDetail">requests</div>
+              </div>
+            </div>
+            <div class="panel">
+              <div class="panel-head"><h2 class="panel-title">快速说明</h2></div>
+              <div class="panel-desc" style="margin:0">
+                <div>· <b>网关 &amp; API Key</b>：客户端只连本地网关，用 <code>sk-mc-...</code> 鉴权</div>
+                <div>· <b>号池</b>：管理上游 <code>oma_/omas_</code> 账号；调度=并发租约 + 低负载优先 + 会话粘性</div>
+                <div>· <b>代理出口</b>：上游转发 / Session 签发走全局 HTTP(S)/SOCKS 代理</div>
+                <div>· 粘性：默认按客户端 Key；可传请求头 <code>X-Session-Id</code></div>
+                <div>· 客户端 Base URL 填：<code id="quickBase">http://127.0.0.1:18095/v1</code></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Tab: 网关 + API Key -->
+        <section class="tab-panel" data-panel="gateway">
+          <div class="stack">
+            <div class="panel">
+              <div class="panel-head"><h2 class="panel-title">本地网关</h2></div>
+              <p class="panel-desc">把下面地址填到 Cursor / Claude Code / 任意 OpenAI·Anthropic 兼容客户端。流量经本网关，用 API Key 鉴权后转发到号池账号。</p>
+              <div class="gateway-box mono" id="gatewayInfo">加载中…</div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-head">
+                <h2 class="panel-title">客户端 API Key</h2>
+              </div>
+              <p class="panel-desc">客户端使用的密钥（与上游 oma_ 分离）。生成后填到客户端 Authorization。</p>
+              <div class="stack-sm">
+                <div class="row">
+                  <input id="keyName" type="text" placeholder="名称，如 cursor / claude-code" style="max-width:280px" />
+                  <button class="btn" id="btnNewKey" type="button">生成 Key</button>
+                </div>
+                <div class="msg" id="keyMsg"></div>
+                <div class="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>ID</th><th>名称</th><th>Token</th><th>调用</th><th>状态</th><th>操作</th>
+                      </tr>
+                    </thead>
+                    <tbody id="keyBody"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Tab: 号池 -->
+        <section class="tab-panel" data-panel="accounts">
+          <div class="stack">
+            <div class="panel">
+              <div class="panel-head">
+                <h2 class="panel-title">号池管理</h2>
+                <div class="panel-actions">
+                  <button class="btn btn-outline" id="btnReloadAcc" type="button">刷新列表</button>
+                </div>
+              </div>
+              <p class="panel-desc">上游账号（oma_ + signing_secret）。网关请求时按权重轮询取号，并自动签名转发。</p>
+              <div class="stack-sm">
+                <textarea id="importJson" placeholder='粘贴账号 JSON：{"api_key":"oma_...","signing_secret":"omas_...","email":"..."} 或数组'></textarea>
+                <div class="row">
+                  <button class="btn" id="btnManualAuth" type="button">手动授权（新 Chrome Profile）</button>
+                  <button class="btn btn-outline" id="btnCancelAuth" type="button" disabled>取消授权</button>
+                </div>
+                <div class="msg" id="authMsg"></div>
+                <div class="row">
+                  <button class="btn btn-secondary" id="btnImport" type="button">导入 JSON</button>
+                  <input id="sessionInput" type="text" placeholder="monkeycode_ai_session 值或完整 Cookie" style="flex:1;min-width:220px" />
+                  <button class="btn btn-outline" id="btnMint" type="button">Session 签发入库</button>
+                </div>
+                <div class="msg" id="accMsg"></div>
+                <div class="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>ID</th><th>邮箱 / 标签</th><th>Key</th><th>状态</th><th>并发</th><th>优先级</th><th>失败 / 冷却</th><th>操作</th>
+                      </tr>
+                    </thead>
+                    <tbody id="accBody"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Tab: 代理出口 -->
+        <section class="tab-panel" data-panel="proxy">
+          <div class="stack">
+            <div class="panel">
+              <div class="panel-head">
+                <h2 class="panel-title">代理出口</h2>
+                <div class="panel-actions">
+                  <span class="tag" id="proxyModeTag">直连</span>
+                </div>
+              </div>
+              <p class="panel-desc">
+                全局出口代理：网关转发上游、Session 签发走此代理；本机 Chrome 授权 / CDP 仍直连。
+                支持 <code>http://</code> <code>https://</code> <code>socks5://</code>（SOCKS 需本机已装 PySocks）。
+              </p>
+              <div class="stack-sm">
+                <label class="row" style="gap:10px">
+                  <input id="proxyEnabled" type="checkbox" style="width:auto;height:auto;border-radius:4px" />
+                  <span>启用代理出口</span>
+                </label>
+                <div>
+                  <div class="muted" style="margin-bottom:6px">代理 URL</div>
+                  <input id="proxyUrl" type="text" placeholder="http://user:pass@127.0.0.1:7890 或 socks5://127.0.0.1:1080" class="mono" style="border-radius:12px;font-family:var(--mono)" />
+                </div>
+                <div class="row">
+                  <button class="btn" id="btnProxySave" type="button">保存</button>
+                  <button class="btn btn-outline" id="btnProxyTest" type="button">测试连通</button>
+                  <button class="btn btn-secondary" id="btnProxyClear" type="button">清空并直连</button>
+                </div>
+                <div class="msg" id="proxyMsg"></div>
+                <div class="gateway-box" id="proxyStatus">尚未加载</div>
+              </div>
+            </div>
+            <div class="panel">
+              <div class="panel-head"><h2 class="panel-title">说明</h2></div>
+              <div class="panel-desc" style="margin:0">
+                <div>· 保存后立即热更新，无需重启进程</div>
+                <div>· 示例：<code>http://127.0.0.1:7890</code>、<code>socks5://127.0.0.1:1080</code></div>
+                <div>· 带认证：<code>http://user:pass@host:port</code></div>
+                <div>· 配置文件：<code>data/proxy.json</code></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Tab: 日志 -->
+        <section class="tab-panel" data-panel="logs">
+          <div class="panel">
+            <div class="panel-head"><h2 class="panel-title">最近请求</h2></div>
+            <p class="panel-desc">网关转发记录（最近 30 条）。</p>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>时间</th><th>路径</th><th>模型</th><th>状态</th><th>耗时</th><th>账号</th><th>Key</th><th>错误</th>
+                  </tr>
+                </thead>
+                <tbody id="logBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const state = {
+  theme: localStorage.getItem('mc_theme') || 'light',
+  tab: localStorage.getItem('mc_tab') || 'overview',
+};
+document.documentElement.classList.toggle('dark', state.theme === 'dark');
+
+const TAB_META = {
+  overview: { title: '概览', sub: '运行状态与资源概览' },
+  gateway: { title: '网关 & API Key', sub: '客户端接入地址与密钥' },
+  accounts: { title: '号池', sub: '上游账号、调度与签发' },
+  proxy: { title: '代理出口', sub: '上游与签发的全局出口代理' },
+  logs: { title: '请求日志', sub: '网关转发记录' },
+};
+
+function headers(json = true) {
+  const h = {};
+  if (json) h['Content-Type'] = 'application/json';
+  return h;
+}
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    ...opts,
+    headers: { ...headers(opts.body !== undefined), ...(opts.headers || {}) },
+  });
+  const text = await res.text();
+  let data;
+  try { data = JSON.parse(text); } catch { data = { raw: text }; }
+  if (!res.ok) throw new Error(data.error || data.message || res.statusText || String(res.status));
+  return data;
+}
+
+function setMsg(el, text, ok = false) {
+  el.textContent = text || '';
+  el.className = 'msg' + (text ? (ok ? ' is-ok' : ' is-err') : '');
+}
+
+function fmtTime(ts) {
+  if (!ts) return '-';
+  const d = new Date((ts < 1e12 ? ts * 1000 : ts));
+  return d.toLocaleString();
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+
+function switchTab(tab) {
+  if (!TAB_META[tab]) tab = 'overview';
+  state.tab = tab;
+  localStorage.setItem('mc_tab', tab);
+  document.querySelectorAll('[data-panel]').forEach((el) => {
+    el.classList.toggle('is-active', el.getAttribute('data-panel') === tab);
+  });
+  document.querySelectorAll('#nav [data-tab]').forEach((btn) => {
+    btn.classList.toggle('is-active', btn.getAttribute('data-tab') === tab);
+  });
+  $('pageTitle').textContent = TAB_META[tab].title;
+  $('pageSub').textContent = TAB_META[tab].sub;
+  // reset scroll of content area only
+  document.querySelector('.content').scrollTop = 0;
+}
+
+function renderGateway(meta) {
+  const base = (meta && meta.gateway_base) || (location.origin + '/v1');
+  const upstream = (meta && meta.upstream_default) || '-';
+  $('quickBase').textContent = base;
+  $('gatewayInfo').innerHTML = `
+    <div class="gateway-line">
+      <span>OpenAI Base URL</span>
+      <code>${escapeHtml(base)}</code>
+      <button class="btn btn-outline" type="button" data-copy="${escapeHtml(base)}">复制</button>
+    </div>
+    <div class="gateway-line">
+      <span>Anthropic Base URL</span>
+      <code>${escapeHtml(base)}</code>
+    </div>
+    <div class="muted" style="margin-top:8px">Authorization: <code>Bearer sk-mc-...</code>（本页下方生成）</div>
+    <div class="muted">模型示例: <code>deepseek-v4-flash</code> / <code>monkeycode-basic/deepseek-v4-flash</code></div>
+    <div class="muted">上游默认: <code>${escapeHtml(upstream)}</code></div>
+    <div class="muted">出口: <code>${escapeHtml((meta && meta.proxy && meta.proxy.mode) || 'direct')}</code>${
+      meta && meta.proxy && meta.proxy.url_masked
+        ? ' · <code>' + escapeHtml(meta.proxy.url_masked) + '</code>'
+        : ''
+    }</div>
+  `;
+}
+
+function renderProxyForm(cfg) {
+  const enabled = !!(cfg && cfg.enabled);
+  const url = (cfg && (cfg.url || '')) || '';
+  const mode = (cfg && cfg.mode) || (enabled ? 'proxy' : 'direct');
+  $('proxyEnabled').checked = enabled;
+  if (document.activeElement !== $('proxyUrl')) {
+    $('proxyUrl').value = url;
+  }
+  const tag = $('proxyModeTag');
+  tag.textContent = mode === 'proxy' ? '代理中' : '直连';
+  tag.className = 'tag ' + (mode === 'proxy' ? 'is-on' : 'is-off');
+  const updated = cfg && cfg.updated_at ? fmtTime(cfg.updated_at) : '-';
+  $('proxyStatus').innerHTML = `
+    <div class="gateway-line"><span>模式</span><code>${escapeHtml(mode)}</code></div>
+    <div class="gateway-line"><span>URL</span><code>${escapeHtml((cfg && cfg.url_masked) || url || '(空)')}</code></div>
+    <div class="muted" style="margin-top:8px">更新时间: ${escapeHtml(String(updated))}</div>
+  `;
+}
+
+async function loadProxy() {
+  const cfg = await api('/admin/api/proxy');
+  renderProxyForm(cfg);
+  return cfg;
+}
+
+async function loadGatewayInfo() {
+  try {
+    const res = await fetch('/admin/api/meta');
+    const meta = await res.json();
+    if (!res.ok) throw new Error(meta.error || res.statusText);
+    renderGateway(meta);
+  } catch (e) {
+    renderGateway({
+      gateway_base: location.origin + '/v1',
+      upstream_default: 'https://proxy.monkeycode-ai.net/v1',
+    });
+  }
+}
+
+async function refresh() {
+  await loadGatewayInfo();
+  try { await loadProxy(); } catch (e) { /* proxy tab optional on old server */ }
+  const st = await api('/admin/api/stats');
+  const acc = await api('/admin/api/accounts');
+  const keys = await api('/admin/api/keys');
+
+  $('sAcc').textContent = st.accounts_total;
+  $('sAccDetail').textContent = `inflight ${st.inflight_total || 0} · sticky ${st.sticky_sessions || 0}`;
+  $('sEn').textContent = st.accounts_enabled;
+  $('sEnDetail').textContent = st.accounts_cooldown ? `冷却中 ${st.accounts_cooldown}` : 'enabled / ready';
+  $('sKeys').textContent = st.client_keys_enabled;
+  $('sReq').textContent = st.requests_24h;
+  $('sReqDetail').textContent = st.errors_24h ? `错误 ${st.errors_24h}` : 'last 24 hours';
+
+  const tb = $('accBody');
+  tb.innerHTML = '';
+  for (const a of acc.items || []) {
+    const stTag = !a.enabled
+      ? '<span class="tag is-off">停用</span>'
+      : a.in_cooldown
+        ? '<span class="tag is-cool">冷却</span>'
+        : '<span class="tag is-on">可用</span>';
+    const mc = a.max_concurrent || 3;
+    const inf = a.in_flight || 0;
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td class="mono">${a.id}</td>
+      <td>
+        <div>${escapeHtml(a.email || '-')}</div>
+        <div class="muted">${escapeHtml(a.label || '')}</div>
+      </td>
+      <td class="mono">${escapeHtml(a.api_key_preview || a.api_key || '')}</td>
+      <td>${stTag}</td>
+      <td class="mono">${inf}/${mc}</td>
+      <td class="mono">${a.priority || 0}</td>
+      <td class="muted">fail ${a.fail_count || 0}<div>${escapeHtml(a.last_error || '')}</div></td>
+      <td>
+        <div class="actions">
+          <button class="btn btn-outline" data-act="toggle" data-id="${a.id}" data-en="${a.enabled ? 0 : 1}" type="button">${a.enabled ? '停用' : '启用'}</button>
+          <button class="btn btn-outline" data-act="reset" data-id="${a.id}" type="button">清冷却</button>
+          <button class="btn btn-outline" data-act="conc" data-id="${a.id}" data-mc="${mc}" type="button">并发</button>
+          <button class="btn btn-danger" data-act="del" data-id="${a.id}" type="button">删除</button>
+        </div>
+      </td>`;
+    tb.appendChild(tr);
+  }
+
+  const kb = $('keyBody');
+  kb.innerHTML = '';
+  for (const k of keys.items || []) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td class="mono">${k.id}</td>
+      <td>${escapeHtml(k.name || '')}</td>
+      <td class="mono">
+        <code>${escapeHtml(k.token || '')}</code>
+        <button class="btn btn-outline" data-kcopy="${escapeHtml(k.token || '')}" type="button" style="margin-left:6px">复制</button>
+      </td>
+      <td>${k.request_count || 0}</td>
+      <td>${k.enabled ? '<span class="tag is-on">启用</span>' : '<span class="tag is-off">停用</span>'}</td>
+      <td>
+        <div class="actions">
+          <button class="btn btn-outline" data-kact="toggle" data-id="${k.id}" data-en="${k.enabled ? 0 : 1}" type="button">${k.enabled ? '停用' : '启用'}</button>
+          <button class="btn btn-danger" data-kact="del" data-id="${k.id}" type="button">删除</button>
+        </div>
+      </td>`;
+    kb.appendChild(tr);
+  }
+
+  const lb = $('logBody');
+  lb.innerHTML = '';
+  for (const r of st.recent || []) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td class="muted">${fmtTime(r.created_at)}</td>
+      <td class="mono">${escapeHtml(r.path || '')}</td>
+      <td class="mono">${escapeHtml(r.model || '')}</td>
+      <td>${r.status}</td>
+      <td>${r.latency_ms}ms</td>
+      <td class="muted">${escapeHtml(r.account_email || r.account_label || r.account_id || '-')}</td>
+      <td class="muted">${escapeHtml(r.key_name || r.client_key_id || '-')}</td>
+      <td class="muted">${escapeHtml(r.error || '')}</td>`;
+    lb.appendChild(tr);
+  }
+}
+
+// nav tabs
+document.querySelectorAll('#nav [data-tab]').forEach((btn) => {
+  btn.addEventListener('click', () => switchTab(btn.getAttribute('data-tab')));
+});
+switchTab(state.tab);
+
+$('btnTheme').onclick = () => {
+  state.theme = state.theme === 'dark' ? 'light' : 'dark';
+  localStorage.setItem('mc_theme', state.theme);
+  document.documentElement.classList.toggle('dark', state.theme === 'dark');
+};
+
+$('btnRefresh').onclick = () => refresh().catch((e) => alert(e));
+$('btnReloadAcc').onclick = () => refresh().catch((e) => setMsg($('accMsg'), String(e)));
+
+$('btnProxySave').onclick = async () => {
+  try {
+    const payload = {
+      enabled: $('proxyEnabled').checked,
+      url: $('proxyUrl').value.trim(),
+    };
+    if (payload.enabled && !payload.url) throw new Error('启用时代理 URL 不能为空');
+    const r = await api('/admin/api/proxy', { method: 'POST', body: JSON.stringify(payload) });
+    renderProxyForm(r.proxy || payload);
+    setMsg($('proxyMsg'), payload.enabled ? '已保存并启用代理出口' : '已保存（直连）', true);
+    await loadGatewayInfo();
+  } catch (e) {
+    setMsg($('proxyMsg'), String(e));
+  }
+};
+
+$('btnProxyTest').onclick = async () => {
+  try {
+    setMsg($('proxyMsg'), '测试中…');
+    const r = await api('/admin/api/proxy/test', {
+      method: 'POST',
+      body: JSON.stringify({
+        enabled: $('proxyEnabled').checked,
+        url: $('proxyUrl').value.trim(),
+      }),
+    });
+    const res = r.result || {};
+    const parts = [
+      `模式 ${res.mode || '-'}`,
+      res.egress_ip ? `出口 IP ${res.egress_ip}` : (res.egress_ip_error ? `出口 IP 失败` : '出口 IP -'),
+      res.upstream_ok ? `上游可达 HTTP ${res.upstream_status}` : '上游不可达',
+      res.latency_ms != null ? `${res.latency_ms}ms` : '',
+    ].filter(Boolean);
+    if (res.ok) {
+      setMsg($('proxyMsg'), '测试通过：' + parts.join(' · '), true);
+      $('proxyStatus').innerHTML += `<div class="muted" style="margin-top:8px">最近测试: ${escapeHtml(parts.join(' · '))}</div>`;
+    } else {
+      setMsg($('proxyMsg'), '测试失败：' + (res.error || parts.join(' · ') || 'unknown'));
+    }
+  } catch (e) {
+    setMsg($('proxyMsg'), String(e));
+  }
+};
+
+$('btnProxyClear').onclick = async () => {
+  try {
+    if (!confirm('清空代理配置并改为直连？')) return;
+    const r = await api('/admin/api/proxy', {
+      method: 'POST',
+      body: JSON.stringify({ enabled: false, url: '' }),
+    });
+    renderProxyForm(r.proxy || { enabled: false, url: '', mode: 'direct' });
+    $('proxyUrl').value = '';
+    setMsg($('proxyMsg'), '已清空，当前直连', true);
+    await loadGatewayInfo();
+  } catch (e) {
+    setMsg($('proxyMsg'), String(e));
+  }
+};
+
+$('btnImport').onclick = async () => {
+  try {
+    let raw = $('importJson').value.trim();
+    if (!raw) throw new Error('请粘贴 JSON');
+    let obj = JSON.parse(raw);
+    if (Array.isArray(obj)) obj = { accounts: obj };
+    const r = await api('/admin/api/accounts/import', { method: 'POST', body: JSON.stringify(obj) });
+    setMsg($('accMsg'), `导入 ${r.imported} 个账号`, true);
+    $('importJson').value = '';
+    await refresh();
+  } catch (e) {
+    setMsg($('accMsg'), String(e));
+  }
+};
+
+$('btnMint').onclick = async () => {
+  try {
+    const session = $('sessionInput').value.trim();
+    if (!session) throw new Error('请填写 session');
+    const r = await api('/admin/api/accounts/mint-session', {
+      method: 'POST',
+      body: JSON.stringify({ session }),
+    });
+    setMsg($('accMsg'), `签发成功：${r.email || ''} (#${r.account_id})`, true);
+    $('sessionInput').value = '';
+    await refresh();
+  } catch (e) {
+    setMsg($('accMsg'), String(e));
+  }
+};
+
+$('accBody').onclick = async (ev) => {
+  const btn = ev.target.closest('button[data-act]');
+  if (!btn) return;
+  const id = btn.dataset.id;
+  const act = btn.dataset.act;
+  try {
+    if (act === 'del') {
+      if (!confirm('确认删除账号 #' + id + '？')) return;
+      await api('/admin/api/accounts/' + id, { method: 'DELETE' });
+    } else if (act === 'toggle') {
+      await api('/admin/api/accounts/' + id, {
+        method: 'PATCH',
+        body: JSON.stringify({ enabled: btn.dataset.en === '1' }),
+      });
+    } else if (act === 'reset') {
+      await api('/admin/api/accounts/' + id, {
+        method: 'PATCH',
+        body: JSON.stringify({ reset_cooldown: true }),
+      });
+    } else if (act === 'conc') {
+      const cur = btn.dataset.mc || '3';
+      const v = prompt('设置最大并发 max_concurrent', cur);
+      if (v === null || v === '') return;
+      const n = parseInt(v, 10);
+      if (!Number.isFinite(n) || n < 1) throw new Error('并发需为 >=1 的整数');
+      await api('/admin/api/accounts/' + id, {
+        method: 'PATCH',
+        body: JSON.stringify({ max_concurrent: n }),
+      });
+    }
+    await refresh();
+  } catch (e) {
+    setMsg($('accMsg'), String(e));
+  }
+};
+
+$('btnNewKey').onclick = async () => {
+  try {
+    const name = $('keyName').value.trim() || 'default';
+    const r = await api('/admin/api/keys', { method: 'POST', body: JSON.stringify({ name }) });
+    setMsg($('keyMsg'), '已生成：' + r.key.token, true);
+    $('keyName').value = '';
+    await refresh();
+  } catch (e) {
+    setMsg($('keyMsg'), String(e));
+  }
+};
+
+$('keyBody').onclick = async (ev) => {
+  const copy = ev.target.closest('button[data-kcopy]');
+  if (copy) {
+    await navigator.clipboard.writeText(copy.dataset.kcopy);
+    setMsg($('keyMsg'), '已复制', true);
+    return;
+  }
+  const btn = ev.target.closest('button[data-kact]');
+  if (!btn) return;
+  try {
+    if (btn.dataset.kact === 'del') {
+      if (!confirm('确认删除 Key #' + btn.dataset.id + '？')) return;
+      await api('/admin/api/keys/' + btn.dataset.id, { method: 'DELETE' });
+    } else if (btn.dataset.kact === 'toggle') {
+      await api('/admin/api/keys/' + btn.dataset.id, {
+        method: 'PATCH',
+        body: JSON.stringify({ enabled: btn.dataset.en === '1' }),
+      });
+    }
+    await refresh();
+  } catch (e) {
+    setMsg($('keyMsg'), String(e));
+  }
+};
+
+$('gatewayInfo').addEventListener('click', async (ev) => {
+  const btn = ev.target.closest('button[data-copy]');
+  if (!btn) return;
+  try {
+    await navigator.clipboard.writeText(btn.dataset.copy);
+    setMsg($('keyMsg'), '已复制网关地址', true);
+  } catch (e) {
+    setMsg($('keyMsg'), '复制失败：' + e);
+  }
+});
+
+// ---- manual chrome auth ----
+const authState = { jobId: null, timer: null };
+
+function setAuthBusy(busy) {
+  $('btnManualAuth').disabled = !!busy;
+  $('btnCancelAuth').disabled = !busy;
+}
+
+async function pollAuthJob(jobId) {
+  try {
+    const r = await api('/admin/api/accounts/manual-auth/status?id=' + encodeURIComponent(jobId));
+    const job = r.job || {};
+    const st = job.state || '';
+    setMsg($('authMsg'), job.message || st, st === 'done');
+    if (['done', 'error', 'timeout', 'cancelled'].includes(st)) {
+      clearInterval(authState.timer);
+      authState.timer = null;
+      authState.jobId = null;
+      setAuthBusy(false);
+      if (st === 'done') {
+        await refresh();
+        setMsg($('authMsg'), `授权完成并已入库：${job.email || ''} (#${job.account_id || '-'})；临时 Profile 已删除`, true);
+      }
+      return;
+    }
+  } catch (e) {
+    setMsg($('authMsg'), String(e));
+  }
+}
+
+$('btnManualAuth').onclick = async () => {
+  try {
+    setAuthBusy(true);
+    setMsg($('authMsg'), '正在启动独立 Chrome Profile…');
+    const r = await api('/admin/api/accounts/manual-auth/start', { method: 'POST', body: '{}' });
+    const job = r.job || {};
+    authState.jobId = job.id;
+    setMsg($('authMsg'), job.message || '请在弹出的 Chrome 中完成登录授权');
+    if (authState.timer) clearInterval(authState.timer);
+    authState.timer = setInterval(() => pollAuthJob(job.id), 1500);
+    pollAuthJob(job.id);
+  } catch (e) {
+    setAuthBusy(false);
+    setMsg($('authMsg'), String(e));
+  }
+};
+
+$('btnCancelAuth').onclick = async () => {
+  if (!authState.jobId) return;
+  try {
+    await api('/admin/api/accounts/manual-auth/cancel', {
+      method: 'POST',
+      body: JSON.stringify({ id: authState.jobId }),
+    });
+    if (authState.timer) clearInterval(authState.timer);
+    authState.timer = null;
+    authState.jobId = null;
+    setAuthBusy(false);
+    setMsg($('authMsg'), '已取消，临时 Profile 将清理');
+  } catch (e) {
+    setMsg($('authMsg'), String(e));
+  }
+};
+
+loadGatewayInfo();
+refresh().catch((e) => {
+  setMsg($('accMsg'), String(e));
+  setMsg($('keyMsg'), String(e));
+});
+</script>
+</body>
+</html>

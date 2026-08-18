@@ -1,0 +1,33 @@
+# 本地运行数据与密钥（绝不入库）
+data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.log
+*.pid
+admin_token.txt
+default_client_key.txt
+proxy.json
+.env
+.env.*
+*.pem
+*.key
+!start.sh
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+.env/
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
