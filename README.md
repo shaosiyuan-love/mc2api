@@ -59,15 +59,20 @@ mc2api :18095/v1
 #### Windows
 
 1. 安装 [Python 3.9+](https://www.python.org/downloads/windows/)，安装时勾选 **Add python.exe to PATH**
-2. 任选一种方式：
+2. 若从 GitHub 下载的 ZIP，先解除锁定（否则可能弹「Internet 安全设置阻止打开」）：
+   - 双击 `unblock.bat`，或
+   - 右键 `start.bat` → 属性 → 勾选 **解除锁定** → 确定
+3. 启动：
    - **推荐**：双击 `start.bat`（启动并打开管理台）
+   - 或在 **cmd** 中：`start.bat`
    - 或在 Git Bash 中：
 
 ```bash
 bash ./start.sh start --open
 ```
 
-> 不要用 `sh ./start.sh`（部分环境会有兼容问题）。管理台地址：http://127.0.0.1:18095/admin
+> 不要用 `sh ./start.sh`。管理台：http://127.0.0.1:18095/admin  
+> 若 `start.bat` 一闪乱码/报「不是内部或外部命令」，多半是 ZIP 未解除锁定或未装 Python。
 
 #### macOS / Linux
 
