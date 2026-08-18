@@ -56,6 +56,21 @@ mc2api :18095/v1
 
 ### 2. 一键启动
 
+#### Windows
+
+1. 安装 [Python 3.9+](https://www.python.org/downloads/windows/)，安装时勾选 **Add python.exe to PATH**
+2. 任选一种方式：
+   - **推荐**：双击 `start.bat`（启动并打开管理台）
+   - 或在 Git Bash 中：
+
+```bash
+bash ./start.sh start --open
+```
+
+> 不要用 `sh ./start.sh`（部分环境会有兼容问题）。管理台地址：http://127.0.0.1:18095/admin
+
+#### macOS / Linux
+
 在项目目录下：
 
 ```bash
