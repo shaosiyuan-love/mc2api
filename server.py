@@ -1294,6 +1294,10 @@ class Handler(BaseHTTPRequestHandler):
                 "accounts_total", "accounts_enabled", "client_keys_enabled", "requests_24h"
             )}})
 
+        # Base URL root — many clients probe GET /v1 and require 200
+        if path in ("/v1", "/v1/"):
+            return self._gateway_root()
+
         if path in ("/v1/models", "/models"):
             return self._gateway_models()
 
@@ -1310,6 +1314,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
+        # Some clients POST to /v1 by mistake; point them to real paths
+        if path in ("/v1", "/v1/"):
+            return self._send_json(200, {
+                "ok": True,
+                "service": "mc2api",
+                "message": "Use /v1/messages or /v1/chat/completions",
+                "endpoints": {
+                    "messages": "/v1/messages",
+                    "chat_completions": "/v1/chat/completions",
+                    "models": "/v1/models",
+                },
+            })
         if path in ("/v1/messages", "/messages"):
             return self._gateway_messages()
         if path in ("/v1/chat/completions", "/chat/completions"):
@@ -1516,6 +1532,25 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": str(e)})
 
     # ----- gateway -----
+    def _gateway_root(self) -> None:
+        """OpenAI-compatible base URL probe (GET /v1)."""
+        self._send_json(200, {
+            "ok": True,
+            "service": "mc2api",
+            "object": "api",
+            "version": "v1",
+            "gateway_base": f"http://{HOST}:{PORT}/v1",
+            "admin": f"http://{HOST}:{PORT}/admin",
+            "endpoints": {
+                "models": "/v1/models",
+                "chat_completions": "/v1/chat/completions",
+                "messages": "/v1/messages",
+                "health": "/healthz",
+            },
+            "auth": "Authorization: Bearer sk-mc-...  or  x-api-key: sk-mc-...",
+            "message": "mc2api gateway is running. Set this URL as API Base URL in your client.",
+        })
+
     def _gateway_models(self) -> None:
         try:
             auth_client_key(self._parse_auth_token())
