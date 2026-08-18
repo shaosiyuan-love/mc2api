@@ -16,11 +16,21 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
-MC_HOST = "https://monkeycode-ai.net"
+# 上游控制台可能同时存在 .com / .net；手动授权默认打开 .com，Cookie 双域都取。
+MC_HOSTS = [
+    (os.environ.get("MC_CONSOLE_WEB") or "https://monkeycode-ai.com").rstrip("/"),
+    "https://monkeycode-ai.net",
+    "https://monkeycode-ai.com",
+]
+# de-dupe preserve order
+_seen = set()
+MC_HOSTS = [h for h in MC_HOSTS if not (h in _seen or _seen.add(h))]  # type: ignore[func-returns-value]
+MC_HOST = MC_HOSTS[0]
 START_URL = MC_HOST + "/console/tasks"
+COOKIE_NAME = "monkeycode_ai_session"
 DEFAULT_TIMEOUT = 900
 POLL_SEC = 1.5
 
@@ -225,11 +235,19 @@ def cdp_targets(port: int) -> List[dict]:
         return []
 
 
+def _cookie_probe_urls() -> List[str]:
+    urls: List[str] = []
+    for host in MC_HOSTS:
+        urls.extend([host, host + "/", host + "/console/tasks", host + "/console", host + "/login"])
+    return urls
+
+
 def get_session_cookie(port: int) -> Optional[str]:
     targets = cdp_targets(port)
     page = None
     for t in targets:
-        if t.get("type") == "page" and "monkeycode" in (t.get("url") or ""):
+        url = (t.get("url") or "").lower()
+        if t.get("type") == "page" and ("monkeycode" in url or "monkeycode-ai.com" in url or "monkeycode-ai.net" in url):
             page = t
             break
     if not page:
@@ -246,15 +264,34 @@ def get_session_cookie(port: int) -> Optional[str]:
     origin = f"http://127.0.0.1:{port}"
     ws = SimpleWS(ws_url, origin=origin, timeout=5)
     try:
+        cookies: List[dict] = []
         try:
-            res = ws.call("Network.getCookies", {"urls": [MC_HOST, MC_HOST + "/", START_URL]})
-            cookies = res.get("cookies") or []
+            res = ws.call("Network.getCookies", {"urls": _cookie_probe_urls()})
+            cookies = list(res.get("cookies") or [])
         except Exception:
-            res = ws.call("Storage.getCookies")
-            cookies = res.get("cookies") or []
+            try:
+                res = ws.call("Storage.getCookies")
+                cookies = list(res.get("cookies") or [])
+            except Exception:
+                cookies = []
+        # Prefer cookie whose domain matches known hosts (.com first)
+        ranked: List[Tuple[int, dict]] = []
         for c in cookies:
-            if c.get("name") == "monkeycode_ai_session" and c.get("value"):
-                return str(c.get("value"))
+            if c.get("name") != COOKIE_NAME or not c.get("value"):
+                continue
+            domain = str(c.get("domain") or "").lower()
+            if "monkeycode-ai.com" in domain:
+                score = 2
+            elif "monkeycode-ai.net" in domain:
+                score = 1
+            elif "monkeycode" in domain:
+                score = 1
+            else:
+                score = 0
+            ranked.append((score, c))
+        ranked.sort(key=lambda x: x[0], reverse=True)
+        if ranked:
+            return str(ranked[0][1].get("value"))
         return None
     finally:
         ws.close()

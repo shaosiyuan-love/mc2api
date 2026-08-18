@@ -39,7 +39,15 @@ DEFAULT_MAX_CONCURRENT = int(os.environ.get("MC_CONSOLE_MAX_CONCURRENT", "3"))
 STICKY_TTL = float(os.environ.get("MC_CONSOLE_STICKY_TTL", "1800"))  # seconds
 CAPACITY_WAIT = float(os.environ.get("MC_CONSOLE_CAPACITY_WAIT", "30"))  # seconds; wait for lease free
 USER_AGENT = os.environ.get("MC_CONSOLE_UA", "ohmyagent c49e56a")
-MC_WEB = "https://monkeycode-ai.net"
+# 控制台 Web（签发/手动授权）；默认 .com，兼容 .net
+MC_WEB = (os.environ.get("MC_CONSOLE_WEB") or "https://monkeycode-ai.com").rstrip("/")
+MC_WEB_FALLBACKS = [
+    MC_WEB,
+    "https://monkeycode-ai.com",
+    "https://monkeycode-ai.net",
+]
+_mc_web_seen = set()
+MC_WEB_HOSTS = [h for h in MC_WEB_FALLBACKS if not (h in _mc_web_seen or _mc_web_seen.add(h))]
 
 MODEL_ALIASES = {
     "deepseek-v4-flash": "monkeycode-basic/deepseek-v4-flash",
@@ -1129,41 +1137,50 @@ def mint_from_session(session: str) -> Dict[str, Any]:
         session = session.split("=", 1)[1].strip()
     if not session:
         raise ValueError("session empty")
-    headers = {
-        "Cookie": "monkeycode_ai_session=" + session,
-        "User-Agent": "Mozilla/5.0 mc2api/1.0",
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "Origin": MC_WEB,
-        "Referer": MC_WEB + "/console/tasks",
-    }
-    # profile
-    req = urllib.request.Request(MC_WEB + "/api/v1/users/status", headers=headers, method="GET")
-    with http_open(req, timeout=30) as resp:
-        status = json.loads(resp.read().decode())
-    user = ((status or {}).get("data") or {}).get("user") or {}
-    req2 = urllib.request.Request(
-        MC_WEB + "/api/v1/users/ohmyagent/api-keys",
-        data=b"{}",
-        headers=headers,
-        method="POST",
-    )
-    with http_open(req2, timeout=30) as resp:
-        created = json.loads(resp.read().decode())
-    data = created.get("data") or {}
-    if not data.get("api_key") or not data.get("signing_secret"):
-        raise RuntimeError("mint failed: " + json.dumps(created, ensure_ascii=False)[:300])
-    account = upsert_account(
-        {
-            "label": user.get("name") or "",
-            "email": user.get("email") or "",
-            "api_key": data["api_key"],
-            "signing_secret": data["signing_secret"],
-            "base_url": UPSTREAM_DEFAULT,
-            "enabled": True,
+
+    last_err: Optional[Exception] = None
+    for web in MC_WEB_HOSTS:
+        headers = {
+            "Cookie": "monkeycode_ai_session=" + session,
+            "User-Agent": "Mozilla/5.0 mc2api/1.0",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Origin": web,
+            "Referer": web + "/console/tasks",
         }
-    )
-    return {"user": user, "key_id": data.get("id"), "account": account}
+        try:
+            req = urllib.request.Request(web + "/api/v1/users/status", headers=headers, method="GET")
+            with http_open(req, timeout=30) as resp:
+                status = json.loads(resp.read().decode())
+            user = ((status or {}).get("data") or {}).get("user") or {}
+            req2 = urllib.request.Request(
+                web + "/api/v1/users/ohmyagent/api-keys",
+                data=b"{}",
+                headers=headers,
+                method="POST",
+            )
+            with http_open(req2, timeout=30) as resp:
+                created = json.loads(resp.read().decode())
+            data = created.get("data") or {}
+            if not data.get("api_key") or not data.get("signing_secret"):
+                raise RuntimeError("mint failed: " + json.dumps(created, ensure_ascii=False)[:300])
+            account = upsert_account(
+                {
+                    "label": user.get("name") or "",
+                    "email": user.get("email") or "",
+                    "api_key": data["api_key"],
+                    "signing_secret": data["signing_secret"],
+                    "base_url": UPSTREAM_DEFAULT,
+                    "enabled": True,
+                }
+            )
+            log(f"mint ok via {web} email={account.get('email') or ''}")
+            return {"user": user, "key_id": data.get("id"), "account": account, "web": web}
+        except Exception as e:
+            last_err = e
+            log(f"mint via {web} failed: {e}")
+            continue
+    raise RuntimeError(f"mint failed on all hosts: {last_err}")
 
 
 def upstream_messages(account: Dict[str, Any], body: Dict[str, Any], stream: bool):

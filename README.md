@@ -133,7 +133,7 @@ chmod +x start.sh 一键启动.command   # 首次
 
 #### 方式 B：Session 签发
 
-1. 浏览器登录 [monkeycode-ai.net](https://monkeycode-ai.net)
+1. 浏览器登录 [monkeycode-ai.com](https://monkeycode-ai.com)（兼容 .net）
 2. 取出 Cookie 中的 `monkeycode_ai_session`（或完整 Cookie 字符串）
 3. 粘贴到输入框 → **Session 签发入库**
 
@@ -257,6 +257,7 @@ curl -s http://127.0.0.1:18095/v1/chat/completions \
 | `MC_CONSOLE_PORT` | `18095` | 端口 |
 | `MC_CONSOLE_DATA` | `./data` | 数据目录 |
 | `MC_CONSOLE_UPSTREAM` | `https://proxy.monkeycode-ai.net/v1` | 默认上游 |
+| `MC_CONSOLE_WEB` | `https://monkeycode-ai.com` | 控制台 Web（签发/手动授权，自动回退 .net） |
 | `MC_CONSOLE_TIMEOUT` | `300` | 上游超时（秒） |
 | `MC_CONSOLE_MAX_CONCURRENT` | `3` | 账号默认最大并发 |
 | `MC_CONSOLE_STICKY_TTL` | `1800` | 粘性 TTL（秒） |
