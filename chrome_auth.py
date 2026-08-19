@@ -252,22 +252,30 @@ def _cookie_probe_urls() -> List[str]:
 
 
 def _is_session_cookie_name(name: str) -> bool:
+    """Strict match only — do NOT treat sl-session / generic *_session as login."""
     n = (name or "").lower().strip()
     if not n:
         return False
     if n == COOKIE_NAME:
         return True
-    # tolerate renames / prefixes
+    # tolerate known renames only (never bare "*-session" like Douyin sl-session)
     aliases = (
         "monkeycode_ai_session",
         "monkeycode_session",
-        "mc_session",
+        "monkeycode_ai_token",
         "mc_ai_session",
         "ohmyagent_session",
     )
-    if n in aliases:
-        return True
-    if "session" in n and ("monkey" in n or "ohmy" in n or n.endswith("_session")):
+    return n in aliases
+
+
+def _is_monkeycode_page(url: str) -> bool:
+    u = (url or "").lower()
+    if not u.startswith("http"):
+        return False
+    # must be on product host; exclude third-party OAuth (douyin, etc.)
+    if "monkeycode-ai.com" in u or "monkeycode-ai.net" in u:
+        # avoid pure static assets if any
         return True
     return False
 
@@ -280,6 +288,10 @@ def _pick_session_cookie(cookies: List[dict]) -> Optional[dict]:
         if not val or not _is_session_cookie_name(name):
             continue
         domain = str(c.get("domain") or "").lower()
+        # session cookie must belong to monkeycode hosts (reject document.cookie-only noise)
+        if domain and domain not in ("document.cookie",):
+            if "monkeycode-ai.com" not in domain and "monkeycode-ai.net" not in domain and "monkeycode" not in domain:
+                continue
         score = 0
         if name.lower() == COOKIE_NAME:
             score += 5
@@ -289,6 +301,7 @@ def _pick_session_cookie(cookies: List[dict]) -> Optional[dict]:
             score += 2
         elif "monkeycode" in domain:
             score += 1
+        # UUID-like session values are typical
         if len(val) >= 20:
             score += 1
         ranked.append((score, c))
@@ -477,13 +490,26 @@ def probe_session_cookie(port: int) -> Dict[str, Any]:
             names.append(n)
     out["cookie_names"] = names[:30]
 
+    page_url = str(out.get("page_url") or "")
+    on_product = _is_monkeycode_page(page_url)
     session_c = _pick_session_cookie(all_cookies)
     session = str((session_c or {}).get("value") or "").strip() if session_c else None
     cookie_header = build_cookie_header(all_cookies)
-    preferred_web = preferred_web_from_cookies(all_cookies, out.get("page_url") or "")
+    preferred_web = preferred_web_from_cookies(all_cookies, page_url)
     out["cookie_header"] = cookie_header
     out["preferred_web"] = preferred_web
-    if session:
+
+    # Must be back on monkeycode host after OAuth — never mint on douyin/baizhi pages
+    if session and not on_product:
+        out["error"] = (
+            f"已看到 session，但当前页不在 monkeycode（{page_url[:120] or 'unknown'}）。"
+            f"请完成第三方登录并回到 monkeycode-ai.com/.net 控制台后再等待。"
+        )
+        out["session"] = None
+        out["ok"] = False
+        return out
+
+    if session and on_product:
         out["ok"] = True
         out["session"] = session
         # if header missing session name, force-include
@@ -494,7 +520,12 @@ def probe_session_cookie(port: int) -> Dict[str, Any]:
             out["cookie_header"] = f"{COOKIE_NAME}={session}"
         return out
 
-    out["error"] = last_err or ("no session cookie; saw: " + (",".join(names[:12]) if names else "(none)"))
+    if not on_product and page_url:
+        out["error"] = f"等待回到 monkeycode 页面（当前: {page_url[:120]}）; cookies={','.join(names[:12]) or '(none)'}"
+    else:
+        out["error"] = last_err or (
+            "no monkeycode_ai_session; saw: " + (",".join(names[:12]) if names else "(none)")
+        )
     return out
 
 
@@ -540,6 +571,9 @@ def mint_via_browser_cdp(port: int) -> Dict[str, Any]:
         "key_id": None,
         "raw": "",
     }
+    if not _is_monkeycode_page(page_url):
+        out["error"] = f"not on monkeycode page: {page_url[:120]}"
+        return out
     if not ws_url:
         out["error"] = "no page websocket for in-browser mint"
         return out
@@ -872,7 +906,8 @@ class ManualAuthManager:
             self._set(
                 job,
                 "waiting_login",
-                f"请在弹出的 Chrome 完成登录（打开 {MC_HOST}）。登录成功后不要关窗，等待自动检测…",
+                f"请在弹出的 Chrome 完成登录（{MC_HOST}）。"
+                f"若跳转抖音/第三方授权，请全部完成并回到 monkeycode 控制台后再等待，不要关窗…",
             )
             deadline = time.time() + self.timeout
             session = None
