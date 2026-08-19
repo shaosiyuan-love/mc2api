@@ -1380,16 +1380,94 @@ class Handler(BaseHTTPRequestHandler):
             return {}
         return json.loads(raw.decode("utf-8"))
 
+    def _format_all_headers(self) -> str:
+        """Dump every request header, including duplicates / raw form."""
+        msg = self.headers
+        out: List[str] = []
+        # 1) plain items()
+        out.append("----- headers.items() -----")
+        n = 0
+        try:
+            for k, v in msg.items():
+                out.append(f"{k}: {v}")
+                n += 1
+        except Exception as e:
+            out.append(f"(items error: {e})")
+        if n == 0:
+            out.append("(none)")
+
+        # 2) get_all for each unique key (catches multi-value)
+        out.append("----- headers.get_all() -----")
+        seen = set()
+        try:
+            for k in list(msg.keys()):
+                kl = str(k).lower()
+                if kl in seen:
+                    continue
+                seen.add(kl)
+                vals = msg.get_all(k) or []
+                if not vals:
+                    continue
+                if len(vals) == 1:
+                    out.append(f"{k}: {vals[0]}")
+                else:
+                    for i, v in enumerate(vals):
+                        out.append(f"{k} [{i}]: {v}")
+        except Exception as e:
+            out.append(f"(get_all error: {e})")
+
+        # 3) raw_items if available (preserves original casing / order better)
+        if hasattr(msg, "raw_items"):
+            out.append("----- headers.raw_items() -----")
+            try:
+                for k, v in msg.raw_items():  # type: ignore[attr-defined]
+                    out.append(f"{k}: {v}")
+            except Exception as e:
+                out.append(f"(raw_items error: {e})")
+
+        # 4) as_string full block
+        out.append("----- headers.as_string() -----")
+        try:
+            s = msg.as_string()
+            out.append(s.rstrip("\n") if s else "(empty)")
+        except Exception as e:
+            out.append(f"(as_string error: {e})")
+
+        # 5) key list
+        try:
+            keys = list(msg.keys())
+            out.append("----- header key list -----")
+            out.append(", ".join(keys) if keys else "(none)")
+        except Exception:
+            pass
+        return "\n".join(out)
+
+    def _dump_all_headers(self, where: str = "") -> None:
+        """Dedicated loud dump of all request headers."""
+        try:
+            title = f"ALL REQUEST HEADERS [{self.command} {self.path}]"
+            if where:
+                title += f" ({where})"
+            text = "\n".join(
+                [
+                    f"time: {iso()}",
+                    f"client: {self.address_string()}",
+                    f"request_line: {self.command} {self.path} {self.request_version}",
+                    self._format_all_headers(),
+                ]
+            )
+            log_block(title, text)
+        except Exception as e:
+            log(f"dump headers failed: {e}")
+
     def _dump_incoming_request(self, where: str, *, include_body: bool = True) -> None:
         """Full request dump for debugging client 401 / path issues."""
         try:
+            # Always dump headers first as its own block
+            self._dump_all_headers(where)
+
             raw_path = self.path
             norm = self._normalize_path(urlparse(raw_path).path)
-            headers_map: Dict[str, str] = {}
-            for k, v in self.headers.items():
-                headers_map[str(k)] = str(v)
-            # stable order
-            header_lines = "\n".join(f"  {k}: {v}" for k, v in sorted(headers_map.items(), key=lambda x: x[0].lower()))
             token = self._parse_auth_token()
             body_txt = ""
             body_len = 0
@@ -1418,8 +1496,8 @@ class Handler(BaseHTTPRequestHandler):
                 f"http_version: {self.request_version}",
                 f"parsed_api_key: {token!r}",
                 f"parsed_api_key_len: {len(token) if token else 0}",
-                "headers:",
-                header_lines or "  (none)",
+                "",
+                self._format_all_headers(),
             ]
             if include_body and self.command in ("POST", "PUT", "PATCH"):
                 lines.append(f"body_bytes: {body_len}")
@@ -1570,6 +1648,9 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/v1", "/v1/"):
             return self._gateway_root()
 
+        if path.startswith("/v1") or path in ("/models",):
+            self._dump_all_headers("do_GET")
+
         if path in ("/v1/models", "/models"):
             return self._gateway_models()
 
@@ -1586,6 +1667,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = self._normalize_path(urlparse(self.path).path)
+        # Dump headers for every gateway-ish POST (even 404 paths)
+        if path.startswith("/v1") or path in ("/messages", "/chat/completions", "/models"):
+            self._dump_all_headers("do_POST")
         # Some clients POST to /v1 by mistake; point them to real paths
         if path in ("/v1", "/v1/"):
             return self._send_json(200, {
