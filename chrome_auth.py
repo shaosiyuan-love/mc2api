@@ -502,6 +502,149 @@ def get_session_cookie(port: int) -> Optional[str]:
     return probe_session_cookie(port).get("session")
 
 
+def _page_ws_url(port: int) -> Tuple[Optional[str], str]:
+    """Pick a monkeycode page websocket URL for in-page JS."""
+    targets = cdp_targets(port)
+    pages = [t for t in targets if t.get("type") == "page"]
+    page = None
+    for t in pages:
+        url = (t.get("url") or "").lower()
+        if "monkeycode-ai.com" in url or "monkeycode-ai.net" in url or "monkeycode" in url:
+            if not url.startswith("chrome://") and "devtools://" not in url:
+                page = t
+                break
+    if not page:
+        for t in pages:
+            u = (t.get("url") or "")
+            if u.startswith("http"):
+                page = t
+                break
+    if not page:
+        return None, ""
+    return str(page.get("webSocketDebuggerUrl") or "") or None, str(page.get("url") or "")
+
+
+def mint_via_browser_cdp(port: int) -> Dict[str, Any]:
+    """
+    Mint API key inside the logged-in Chrome page (fetch + credentials:include).
+    This matches real browser requests and avoids Windows cookie-replay 401.
+    """
+    ws_url, page_url = _page_ws_url(port)
+    out: Dict[str, Any] = {
+        "ok": False,
+        "error": "",
+        "page_url": page_url,
+        "user": {},
+        "api_key": "",
+        "signing_secret": "",
+        "key_id": None,
+        "raw": "",
+    }
+    if not ws_url:
+        out["error"] = "no page websocket for in-browser mint"
+        return out
+    if ws_url.startswith("http://"):
+        ws_url = "ws://" + ws_url[len("http://") :]
+    if not ws_url.startswith("ws://"):
+        out["error"] = f"unsupported ws url: {ws_url[:80]}"
+        return out
+
+    # relative URLs so we stay on whatever host the user logged into (.com/.net)
+    js = r"""
+(() => {
+  const run = async () => {
+    const optsGet = { method: 'GET', credentials: 'include', headers: { 'Accept': 'application/json' } };
+    const st = await fetch('/api/v1/users/status', optsGet);
+    const stText = await st.text();
+    let stJson = null;
+    try { stJson = JSON.parse(stText); } catch (e) { stJson = { raw: stText.slice(0, 300) }; }
+    if (!st.ok) {
+      return { ok: false, step: 'status', status: st.status, body: stJson, page: location.href };
+    }
+    const optsPost = {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+      body: '{}'
+    };
+    const cr = await fetch('/api/v1/users/ohmyagent/api-keys', optsPost);
+    const crText = await cr.text();
+    let crJson = null;
+    try { crJson = JSON.parse(crText); } catch (e) { crJson = { raw: crText.slice(0, 300) }; }
+    if (!cr.ok) {
+      return { ok: false, step: 'api-keys', status: cr.status, body: crJson, page: location.href, user: (stJson && stJson.data && stJson.data.user) || null };
+    }
+    const data = (crJson && crJson.data) || {};
+    return {
+      ok: true,
+      status: cr.status,
+      page: location.href,
+      user: (stJson && stJson.data && stJson.data.user) || {},
+      api_key: data.api_key || '',
+      signing_secret: data.signing_secret || '',
+      key_id: data.id || null,
+      body: crJson
+    };
+  };
+  return run().then((r) => JSON.stringify(r)).catch((e) => JSON.stringify({ ok: false, error: String(e), page: location.href }));
+})()
+"""
+    origin = f"http://127.0.0.1:{port}"
+    try:
+        ws = SimpleWS(ws_url, origin=origin, timeout=8)
+    except Exception as e:
+        out["error"] = f"ws connect: {e}"
+        return out
+    try:
+        try:
+            ws.call("Runtime.enable", timeout=3.0)
+        except Exception:
+            pass
+        res = ws.call(
+            "Runtime.evaluate",
+            {
+                "expression": js,
+                "awaitPromise": True,
+                "returnByValue": True,
+            },
+            timeout=45.0,
+        )
+        val = (res.get("result") or {}).get("value")
+        if isinstance(val, dict):
+            payload = val
+        else:
+            try:
+                payload = json.loads(val or "{}")
+            except Exception:
+                out["error"] = f"bad js result: {str(val)[:200]}"
+                return out
+        out["raw"] = json.dumps(payload, ensure_ascii=False)[:500]
+        out["page_url"] = str(payload.get("page") or page_url or "")
+        if not payload.get("ok"):
+            body = payload.get("body")
+            out["error"] = (
+                f"in-page {payload.get('step') or 'mint'} "
+                f"HTTP {payload.get('status')}: {json.dumps(body, ensure_ascii=False)[:180] if body is not None else payload.get('error')}"
+            )
+            return out
+        api_key = str(payload.get("api_key") or "").strip()
+        secret = str(payload.get("signing_secret") or "").strip()
+        if not api_key or not secret:
+            out["error"] = "in-page mint missing api_key/signing_secret: " + out["raw"][:200]
+            return out
+        out["ok"] = True
+        out["api_key"] = api_key
+        out["signing_secret"] = secret
+        out["key_id"] = payload.get("key_id")
+        out["user"] = payload.get("user") or {}
+        return out
+    except Exception as e:
+        out["error"] = f"in-page mint exception: {e}"
+        return out
+    finally:
+        ws.close()
+
+
 def kill_process_tree(proc: subprocess.Popen) -> None:
     if proc.poll() is not None:
         return
@@ -794,23 +937,48 @@ class ManualAuthManager:
                 )
                 return
 
-            self._set(job, "minting", "已检测到登录，正在签发凭证并入库…")
-            # Pass full cookie jar so Cloudflare/WAF cookies are included (fixes 401 on Windows)
-            result = self.mint_callback(
-                {
-                    "session": session,
-                    "cookie_header": cookie_header or f"{COOKIE_NAME}={session}",
-                    "preferred_web": preferred_web,
-                    "page_url": job.page_url,
-                }
-            )
+            self._set(job, "minting", "已检测到登录，正在页面内签发凭证…")
+            # Prefer in-page fetch (same as browser). Server-side cookie replay can 401 on Windows.
+            browser_mint = mint_via_browser_cdp(job.debug_port)
+            if browser_mint.get("ok"):
+                log(
+                    f"in-page mint ok page={browser_mint.get('page_url')} "
+                    f"key={(browser_mint.get('api_key') or '')[:12]}…"
+                )
+                result = self.mint_callback(
+                    {
+                        "pre_minted": True,
+                        "api_key": browser_mint.get("api_key"),
+                        "signing_secret": browser_mint.get("signing_secret"),
+                        "key_id": browser_mint.get("key_id"),
+                        "user": browser_mint.get("user") or {},
+                        "page_url": browser_mint.get("page_url") or job.page_url,
+                        "preferred_web": preferred_web,
+                    }
+                )
+            else:
+                log(f"in-page mint failed: {browser_mint.get('error')}; fallback server mint")
+                self._set(
+                    job,
+                    "minting",
+                    f"页面内签发失败，尝试服务端重放… ({str(browser_mint.get('error') or '')[:80]})",
+                )
+                result = self.mint_callback(
+                    {
+                        "session": session,
+                        "cookie_header": cookie_header or f"{COOKIE_NAME}={session}",
+                        "preferred_web": preferred_web,
+                        "page_url": job.page_url,
+                    }
+                )
             account = result.get("account") or {}
             user = result.get("user") or {}
             email = account.get("email") or user.get("email") or ""
+            via = result.get("web") or result.get("mint_via") or ""
             self._set(
                 job,
                 "done",
-                f"授权完成：{email or 'ok'}",
+                f"授权完成：{email or 'ok'}" + (f"（{via}）" if via else ""),
                 email=email,
                 account_id=account.get("id"),
             )

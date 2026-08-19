@@ -1210,6 +1210,34 @@ def _http_json(method: str, url: str, headers: Dict[str, str], data: Optional[by
 
 
 def mint_from_session(session_or_payload: Any = "", **kwargs: Any) -> Dict[str, Any]:
+    # Manual auth may already mint inside Chrome page (Windows-safe path)
+    if isinstance(session_or_payload, dict) and session_or_payload.get("pre_minted"):
+        api_key = str(session_or_payload.get("api_key") or "").strip()
+        signing_secret = str(session_or_payload.get("signing_secret") or "").strip()
+        if not api_key or not signing_secret:
+            raise ValueError("pre_minted payload missing api_key/signing_secret")
+        user = session_or_payload.get("user") or {}
+        if not isinstance(user, dict):
+            user = {}
+        account = upsert_account(
+            {
+                "label": user.get("name") or "",
+                "email": user.get("email") or "",
+                "api_key": api_key,
+                "signing_secret": signing_secret,
+                "base_url": UPSTREAM_DEFAULT,
+                "enabled": True,
+            }
+        )
+        log(f"mint upsert pre_minted email={account.get('email') or ''} id={account.get('id')}")
+        return {
+            "user": user,
+            "key_id": session_or_payload.get("key_id"),
+            "account": account,
+            "web": "in-page",
+            "mint_via": "browser-cdp",
+        }
+
     p = _normalize_mint_payload(session_or_payload, **kwargs)
     session = p["session"]
     cookie_header = p["cookie_header"]
