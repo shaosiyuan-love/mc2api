@@ -1380,13 +1380,47 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def _parse_auth_token(self) -> Optional[str]:
-        auth = self.headers.get("Authorization") or self.headers.get("authorization") or ""
-        xkey = self.headers.get("x-api-key") or self.headers.get("X-Api-Key") or ""
-        if xkey:
-            return xkey.strip()
-        if auth:
-            return auth.strip()
+        # Common client headers (OpenAI-compatible / Chinese IDE plugins)
+        header_names = (
+            "Authorization",
+            "authorization",
+            "x-api-key",
+            "X-Api-Key",
+            "api-key",
+            "Api-Key",
+            "API-Key",
+            "openai-api-key",
+            "OpenAI-Api-Key",
+            "x-openai-api-key",
+        )
+        for name in header_names:
+            raw = self.headers.get(name)
+            if raw is None:
+                continue
+            tok = str(raw).strip()
+            if not tok:
+                continue
+            # Authorization: Bearer sk-... / Token sk-... / just sk-...
+            low = tok.lower()
+            for prefix in ("bearer ", "token "):
+                if low.startswith(prefix):
+                    tok = tok[len(prefix):].strip()
+                    break
+            if tok:
+                return tok
         return None
+
+    def _normalize_path(self, path: str) -> str:
+        """Normalize client path quirks: trailing slash, double /v1."""
+        path = (path or "/").split("?", 1)[0]
+        if len(path) > 1 and path.endswith("/"):
+            path = path.rstrip("/")
+        # some clients set base host-only and still prefix /v1 again
+        if path.startswith("/v1/v1/"):
+            path = "/v1/" + path[len("/v1/v1/") :]
+        elif path == "/v1/v1":
+            path = "/v1"
+        return path or "/"
 
     def _require_admin(self) -> bool:
         # Local console: admin APIs are open on loopback-oriented deployment.
@@ -1395,14 +1429,18 @@ class Handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self) -> None:  # noqa: N802
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type, x-api-key, X-Admin-Token, anthropic-version")
+        self.send_header(
+            "Access-Control-Allow-Headers",
+            "Authorization, Content-Type, x-api-key, api-key, Api-Key, OpenAI-Api-Key, "
+            "openai-api-key, X-Admin-Token, anthropic-version",
+        )
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
         self.send_header("Content-Length", "0")
         self.end_headers()
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
-        path = parsed.path
+        path = self._normalize_path(parsed.path)
 
         if path in ("/", "/admin", "/admin/"):
             return self._serve_admin()
@@ -1434,7 +1472,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(404, {"error": "not found"})
 
     def do_POST(self) -> None:  # noqa: N802
-        path = urlparse(self.path).path
+        path = self._normalize_path(urlparse(self.path).path)
         # Some clients POST to /v1 by mistake; point them to real paths
         if path in ("/v1", "/v1/"):
             return self._send_json(200, {
@@ -1455,7 +1493,7 @@ class Handler(BaseHTTPRequestHandler):
             if not self._require_admin():
                 return
             return self._admin_post(path)
-        self._send_json(404, {"error": "not found"})
+        self._send_json(404, {"error": "not found", "path": path})
 
     def do_PATCH(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
