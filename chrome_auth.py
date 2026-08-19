@@ -907,19 +907,18 @@ class ManualAuthManager:
                 job,
                 "waiting_login",
                 f"请在弹出的 Chrome 完成登录（{MC_HOST}）。"
-                f"若跳转抖音/第三方授权，请全部完成并回到 monkeycode 控制台后再等待，不要关窗…",
+                f"若跳转抖音/第三方授权，请全部完成并回到 monkeycode 控制台后再等待；"
+                f"过程中不会自动关窗，只有成功/超时/你点取消才会关闭。",
             )
             deadline = time.time() + self.timeout
-            session = None
-            cookie_header = ""
-            preferred_web = MC_HOST
             last_detail = ""
+            mint_fail_count = 0
+            result: Optional[Dict[str, Any]] = None
             while time.time() < deadline:
                 if job._stop.is_set():
                     self._set(job, "cancelled", "已取消")
                     return
                 if job._proc and job._proc.poll() is not None:
-                    # user closed chrome before login
                     self._set(job, "error", "Chrome 已关闭，未完成授权", error="chrome closed")
                     return
                 try:
@@ -943,89 +942,110 @@ class ManualAuthManager:
                 session = probe.get("session") if probe.get("ok") else None
                 cookie_header = str(probe.get("cookie_header") or "")
                 preferred_web = str(probe.get("preferred_web") or MC_HOST)
-                if session:
-                    log(
-                        f"session cookie found via {probe.get('method')} page={job.page_url} "
-                        f"web={preferred_web} cookie_header_len={len(cookie_header)}"
-                    )
-                    break
-                detail = str(probe.get("error") or "")
-                # refresh UI every few probes
-                if job.probe_count == 1 or job.probe_count % 3 == 0 or detail != last_detail:
-                    last_detail = detail
-                    page = job.page_url or "(未检测到页面)"
-                    names_s = job.cookie_names or "(无cookie)"
+
+                if not session:
+                    detail = str(probe.get("error") or "")
+                    if job.probe_count == 1 or job.probe_count % 3 == 0 or detail != last_detail:
+                        last_detail = detail
+                        page = job.page_url or "(未检测到页面)"
+                        names_s = job.cookie_names or "(无cookie)"
+                        self._set(
+                            job,
+                            "waiting_login",
+                            f"等待登录中… 第{job.probe_count}次 | 页面: {page[:90]} | {names_s[:80]}",
+                        )
+                    time.sleep(POLL_SEC)
+                    continue
+
+                # Have real monkeycode session on product page → try mint (do NOT close chrome on failure)
+                log(
+                    f"session ok page={job.page_url} web={preferred_web} "
+                    f"cookie_header_len={len(cookie_header)}"
+                )
+                self._set(job, "minting", "已回到 monkeycode，正在页面内签发…（失败不会关窗）")
+                browser_mint = mint_via_browser_cdp(job.debug_port)
+                try:
+                    if browser_mint.get("ok"):
+                        log(
+                            f"in-page mint ok page={browser_mint.get('page_url')} "
+                            f"key={(browser_mint.get('api_key') or '')[:12]}…"
+                        )
+                        result = self.mint_callback(
+                            {
+                                "pre_minted": True,
+                                "api_key": browser_mint.get("api_key"),
+                                "signing_secret": browser_mint.get("signing_secret"),
+                                "key_id": browser_mint.get("key_id"),
+                                "user": browser_mint.get("user") or {},
+                                "page_url": browser_mint.get("page_url") or job.page_url,
+                                "preferred_web": preferred_web,
+                            }
+                        )
+                    else:
+                        log(f"in-page mint failed: {browser_mint.get('error')}; fallback server mint")
+                        self._set(
+                            job,
+                            "minting",
+                            f"页面内签发未成功，尝试服务端… ({str(browser_mint.get('error') or '')[:60]})",
+                        )
+                        result = self.mint_callback(
+                            {
+                                "session": session,
+                                "cookie_header": cookie_header or f"{COOKIE_NAME}={session}",
+                                "preferred_web": preferred_web,
+                                "page_url": job.page_url,
+                            }
+                        )
+                except Exception as mint_err:
+                    mint_fail_count += 1
+                    log(f"mint attempt failed ({mint_fail_count}): {mint_err}")
+                    # Stay open — user may still be finishing OAuth / navigating back
                     self._set(
                         job,
                         "waiting_login",
-                        f"等待登录中… 第{job.probe_count}次探测 | 页面: {page[:80]} | cookies: {names_s[:100]}",
+                        f"签发暂未成功（{mint_err}）。请确认已回到 monkeycode 控制台，将继续自动重试…",
+                        error=str(mint_err)[:200],
                     )
-                time.sleep(POLL_SEC)
+                    result = None
+                    time.sleep(POLL_SEC)
+                    continue
 
-            if not session:
+                # success
+                account = result.get("account") or {}
+                user = result.get("user") or {}
+                email = account.get("email") or user.get("email") or ""
+                via = result.get("web") or result.get("mint_via") or ""
                 self._set(
                     job,
-                    "timeout",
-                    f"等待登录超时。最后页面: {job.page_url or '-'}；cookies: {job.cookie_names or '(无)'}。"
-                    f"请确认已在弹窗 Chrome 登录成功，或改用下方 Session 签发。",
-                    error="timeout",
+                    "done",
+                    f"授权完成：{email or 'ok'}" + (f"（{via}）" if via else ""),
+                    email=email,
+                    account_id=account.get("id"),
+                    error="",
                 )
                 return
 
-            self._set(job, "minting", "已检测到登录，正在页面内签发凭证…")
-            # Prefer in-page fetch (same as browser). Server-side cookie replay can 401 on Windows.
-            browser_mint = mint_via_browser_cdp(job.debug_port)
-            if browser_mint.get("ok"):
-                log(
-                    f"in-page mint ok page={browser_mint.get('page_url')} "
-                    f"key={(browser_mint.get('api_key') or '')[:12]}…"
-                )
-                result = self.mint_callback(
-                    {
-                        "pre_minted": True,
-                        "api_key": browser_mint.get("api_key"),
-                        "signing_secret": browser_mint.get("signing_secret"),
-                        "key_id": browser_mint.get("key_id"),
-                        "user": browser_mint.get("user") or {},
-                        "page_url": browser_mint.get("page_url") or job.page_url,
-                        "preferred_web": preferred_web,
-                    }
-                )
-            else:
-                log(f"in-page mint failed: {browser_mint.get('error')}; fallback server mint")
-                self._set(
-                    job,
-                    "minting",
-                    f"页面内签发失败，尝试服务端重放… ({str(browser_mint.get('error') or '')[:80]})",
-                )
-                result = self.mint_callback(
-                    {
-                        "session": session,
-                        "cookie_header": cookie_header or f"{COOKIE_NAME}={session}",
-                        "preferred_web": preferred_web,
-                        "page_url": job.page_url,
-                    }
-                )
-            account = result.get("account") or {}
-            user = result.get("user") or {}
-            email = account.get("email") or user.get("email") or ""
-            via = result.get("web") or result.get("mint_via") or ""
             self._set(
                 job,
-                "done",
-                f"授权完成：{email or 'ok'}" + (f"（{via}）" if via else ""),
-                email=email,
-                account_id=account.get("id"),
+                "timeout",
+                f"等待登录超时。最后页面: {job.page_url or '-'}；cookies: {job.cookie_names or '(无)'}。"
+                f"请确认已回到 monkeycode 控制台，或改用下方 Session 签发。",
+                error="timeout",
             )
         except Exception as e:
             self._set(job, "error", f"授权失败：{e}", error=str(e))
             log(f"job error: {e}")
         finally:
-            # Always delete the temporary profile after finish
-            try:
-                self._cleanup(job)
-            except Exception as e:
-                log(f"cleanup error: {e}")
+            # Only close Chrome + delete profile on terminal states.
+            # Never leave a "waiting" job with chrome killed from outside this path.
+            st = job.state
+            if st in ("done", "cancelled", "timeout", "error"):
+                try:
+                    self._cleanup(job)
+                except Exception as e:
+                    log(f"cleanup error: {e}")
+            else:
+                log(f"skip cleanup for non-terminal state={st}")
             # prune old finished jobs (keep last 20)
             with self._lock:
                 finished = [j for j in self._jobs.values() if j.state not in ("starting", "waiting_login", "minting")]
