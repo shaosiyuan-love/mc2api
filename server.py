@@ -1143,37 +1143,127 @@ def stats() -> Dict[str, Any]:
     }
 
 
-def mint_from_session(session: str) -> Dict[str, Any]:
-    session = (session or "").strip()
+def _normalize_mint_payload(session_or_payload: Any, **kwargs: Any) -> Dict[str, str]:
+    """Accept plain session string or rich payload from manual auth."""
+    session = ""
+    cookie_header = ""
+    preferred_web = ""
+    page_url = ""
+    if isinstance(session_or_payload, dict):
+        session = str(session_or_payload.get("session") or "").strip()
+        cookie_header = str(session_or_payload.get("cookie_header") or "").strip()
+        preferred_web = str(session_or_payload.get("preferred_web") or "").strip()
+        page_url = str(session_or_payload.get("page_url") or "").strip()
+    else:
+        session = str(session_or_payload or "").strip()
+        cookie_header = str(kwargs.get("cookie_header") or "").strip()
+        preferred_web = str(kwargs.get("preferred_web") or "").strip()
+        page_url = str(kwargs.get("page_url") or "").strip()
+
     if session.lower().startswith("monkeycode_ai_session="):
+        # full cookie line pasted
+        if not cookie_header:
+            cookie_header = session
         session = session.split("=", 1)[1].strip()
-    if not session:
+    # pasted multi-cookie string
+    if "monkeycode_ai_session=" in session and ";" in session:
+        cookie_header = session
+        for part in session.split(";"):
+            part = part.strip()
+            if part.lower().startswith("monkeycode_ai_session="):
+                session = part.split("=", 1)[1].strip()
+                break
+    if not session and cookie_header:
+        for part in cookie_header.split(";"):
+            part = part.strip()
+            if part.lower().startswith("monkeycode_ai_session="):
+                session = part.split("=", 1)[1].strip()
+                break
+    if not cookie_header and session:
+        cookie_header = "monkeycode_ai_session=" + session
+    elif cookie_header and session and "monkeycode_ai_session=" not in cookie_header.lower():
+        cookie_header = "monkeycode_ai_session=" + session + "; " + cookie_header
+    return {
+        "session": session,
+        "cookie_header": cookie_header,
+        "preferred_web": preferred_web.rstrip("/"),
+        "page_url": page_url,
+    }
+
+
+def _http_json(method: str, url: str, headers: Dict[str, str], data: Optional[bytes] = None) -> Tuple[int, Any, str]:
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with http_open(req, timeout=30) as resp:
+            raw = resp.read().decode("utf-8", "replace")
+            code = int(getattr(resp, "status", 200) or 200)
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode("utf-8", "replace") if hasattr(e, "read") else str(e)
+        code = int(e.code)
+    except Exception as e:
+        return 0, None, str(e)
+    try:
+        obj = json.loads(raw) if raw else {}
+    except Exception:
+        obj = {"raw": raw[:500]}
+    return code, obj, raw[:500]
+
+
+def mint_from_session(session_or_payload: Any = "", **kwargs: Any) -> Dict[str, Any]:
+    p = _normalize_mint_payload(session_or_payload, **kwargs)
+    session = p["session"]
+    cookie_header = p["cookie_header"]
+    preferred_web = p["preferred_web"]
+    if not session and not cookie_header:
         raise ValueError("session empty")
 
-    last_err: Optional[Exception] = None
-    for web in MC_WEB_HOSTS:
+    # host order: preferred first
+    hosts: List[str] = []
+    if preferred_web:
+        hosts.append(preferred_web)
+    for h in MC_WEB_HOSTS:
+        if h not in hosts:
+            hosts.append(h)
+
+    ua = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    )
+    last_err: Optional[str] = None
+    for web in hosts:
         headers = {
-            "Cookie": "monkeycode_ai_session=" + session,
-            "User-Agent": "Mozilla/5.0 mc2api/1.0",
-            "Accept": "application/json",
-            "Content-Type": "application/json",
+            "Cookie": cookie_header,
+            "User-Agent": ua,
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             "Origin": web,
             "Referer": web + "/console/tasks",
         }
         try:
-            req = urllib.request.Request(web + "/api/v1/users/status", headers=headers, method="GET")
-            with http_open(req, timeout=30) as resp:
-                status = json.loads(resp.read().decode())
+            code1, status, raw1 = _http_json("GET", web + "/api/v1/users/status", headers)
+            if code1 == 401 or code1 == 403:
+                raise RuntimeError(f"status {code1}: {(raw1 or '')[:180]}")
+            if code1 == 0:
+                raise RuntimeError(raw1 or "status request failed")
+            if code1 >= 400:
+                raise RuntimeError(f"status HTTP {code1}: {(raw1 or '')[:180]}")
             user = ((status or {}).get("data") or {}).get("user") or {}
-            req2 = urllib.request.Request(
+            # create key
+            headers2 = dict(headers)
+            headers2["Content-Type"] = "application/json"
+            code2, created, raw2 = _http_json(
+                "POST",
                 web + "/api/v1/users/ohmyagent/api-keys",
+                headers2,
                 data=b"{}",
-                headers=headers,
-                method="POST",
             )
-            with http_open(req2, timeout=30) as resp:
-                created = json.loads(resp.read().decode())
-            data = created.get("data") or {}
+            if code2 == 401 or code2 == 403:
+                raise RuntimeError(f"api-keys {code2}: {(raw2 or '')[:180]}")
+            if code2 == 0:
+                raise RuntimeError(raw2 or "api-keys request failed")
+            if code2 >= 400:
+                raise RuntimeError(f"api-keys HTTP {code2}: {(raw2 or '')[:180]}")
+            data = (created or {}).get("data") or {}
             if not data.get("api_key") or not data.get("signing_secret"):
                 raise RuntimeError("mint failed: " + json.dumps(created, ensure_ascii=False)[:300])
             account = upsert_account(
@@ -1186,10 +1276,13 @@ def mint_from_session(session: str) -> Dict[str, Any]:
                     "enabled": True,
                 }
             )
-            log(f"mint ok via {web} email={account.get('email') or ''}")
+            log(
+                f"mint ok via {web} email={account.get('email') or ''} "
+                f"cookie_names={len(cookie_header.split(';'))} session_len={len(session)}"
+            )
             return {"user": user, "key_id": data.get("id"), "account": account, "web": web}
         except Exception as e:
-            last_err = e
+            last_err = str(e)
             log(f"mint via {web} failed: {e}")
             continue
     raise RuntimeError(f"mint failed on all hosts: {last_err}")

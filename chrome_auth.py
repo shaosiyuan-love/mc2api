@@ -272,7 +272,7 @@ def _is_session_cookie_name(name: str) -> bool:
     return False
 
 
-def _pick_session_value(cookies: List[dict]) -> Optional[str]:
+def _pick_session_cookie(cookies: List[dict]) -> Optional[dict]:
     ranked: List[Tuple[int, dict]] = []
     for c in cookies:
         name = str(c.get("name") or "")
@@ -293,9 +293,62 @@ def _pick_session_value(cookies: List[dict]) -> Optional[str]:
             score += 1
         ranked.append((score, c))
     ranked.sort(key=lambda x: x[0], reverse=True)
-    if ranked:
-        return str(ranked[0][1].get("value") or "").strip() or None
-    return None
+    return ranked[0][1] if ranked else None
+
+
+def _pick_session_value(cookies: List[dict]) -> Optional[str]:
+    c = _pick_session_cookie(cookies)
+    if not c:
+        return None
+    return str(c.get("value") or "").strip() or None
+
+
+def _cookie_relevant(c: dict) -> bool:
+    """Keep session + CDN/WAF cookies needed for API auth."""
+    name = str(c.get("name") or "").lower()
+    domain = str(c.get("domain") or "").lower()
+    if not name or not str(c.get("value") or "").strip():
+        return False
+    if _is_session_cookie_name(name):
+        return True
+    # Cloudflare / common edge cookies
+    if name.startswith("cf_") or name in ("__cf_bm", "cf_clearance", "__cflb", "_cfuvid"):
+        return True
+    if "monkeycode" in domain or domain in ("document.cookie",):
+        return True
+    return False
+
+
+def build_cookie_header(cookies: List[dict]) -> str:
+    """Build Cookie request header; last value wins per name."""
+    merged: Dict[str, str] = {}
+    for c in cookies:
+        if not _cookie_relevant(c):
+            continue
+        name = str(c.get("name") or "").strip()
+        val = str(c.get("value") or "").strip()
+        if not name or not val:
+            continue
+        merged[name] = val
+    # ensure session key present if any session-like exists
+    if COOKIE_NAME not in merged:
+        for n, v in list(merged.items()):
+            if _is_session_cookie_name(n):
+                merged[COOKIE_NAME] = v
+                break
+    return "; ".join(f"{k}={v}" for k, v in merged.items())
+
+
+def preferred_web_from_cookies(cookies: List[dict], page_url: str = "") -> str:
+    blob = " ".join(
+        str(c.get("domain") or "") for c in cookies
+    ) + " " + (page_url or "")
+    blob = blob.lower()
+    if "monkeycode-ai.com" in blob:
+        return "https://monkeycode-ai.com"
+    if "monkeycode-ai.net" in blob:
+        return "https://monkeycode-ai.net"
+    return MC_HOST
 
 
 def _collect_cookies_via_ws(ws: SimpleWS) -> List[dict]:
@@ -347,11 +400,13 @@ def _collect_cookies_via_ws(ws: SimpleWS) -> List[dict]:
 def probe_session_cookie(port: int) -> Dict[str, Any]:
     """
     Probe CDP for session cookie.
-    Returns {ok, session, page_url, cookie_names, error, method}
+    Returns {ok, session, cookie_header, preferred_web, page_url, cookie_names, error, method}
     """
     out: Dict[str, Any] = {
         "ok": False,
         "session": None,
+        "cookie_header": "",
+        "preferred_web": MC_HOST,
         "page_url": "",
         "cookie_names": [],
         "error": "",
@@ -422,10 +477,21 @@ def probe_session_cookie(port: int) -> Dict[str, Any]:
             names.append(n)
     out["cookie_names"] = names[:30]
 
-    session = _pick_session_value(all_cookies)
+    session_c = _pick_session_cookie(all_cookies)
+    session = str((session_c or {}).get("value") or "").strip() if session_c else None
+    cookie_header = build_cookie_header(all_cookies)
+    preferred_web = preferred_web_from_cookies(all_cookies, out.get("page_url") or "")
+    out["cookie_header"] = cookie_header
+    out["preferred_web"] = preferred_web
     if session:
         out["ok"] = True
         out["session"] = session
+        # if header missing session name, force-include
+        if cookie_header and COOKIE_NAME not in cookie_header and session_c:
+            name = str(session_c.get("name") or COOKIE_NAME)
+            out["cookie_header"] = f"{name}={session}" + ("; " + cookie_header if cookie_header else "")
+        elif not cookie_header and session:
+            out["cookie_header"] = f"{COOKIE_NAME}={session}"
         return out
 
     out["error"] = last_err or ("no session cookie; saw: " + (",".join(names[:12]) if names else "(none)"))
@@ -537,7 +603,12 @@ class AuthJob:
 
 
 class ManualAuthManager:
-    def __init__(self, work_root: Path, mint_callback: Callable[[str], Dict[str, Any]], timeout: int = DEFAULT_TIMEOUT):
+    def __init__(
+        self,
+        work_root: Path,
+        mint_callback: Callable[..., Dict[str, Any]],
+        timeout: int = DEFAULT_TIMEOUT,
+    ):
         self.work_root = work_root
         self.work_root.mkdir(parents=True, exist_ok=True)
         self.mint_callback = mint_callback
@@ -662,6 +733,8 @@ class ManualAuthManager:
             )
             deadline = time.time() + self.timeout
             session = None
+            cookie_header = ""
+            preferred_web = MC_HOST
             last_detail = ""
             while time.time() < deadline:
                 if job._stop.is_set():
@@ -675,15 +748,28 @@ class ManualAuthManager:
                     probe = probe_session_cookie(job.debug_port)
                 except Exception as e:
                     log(f"cookie poll: {e}")
-                    probe = {"ok": False, "session": None, "error": str(e), "page_url": "", "cookie_names": []}
+                    probe = {
+                        "ok": False,
+                        "session": None,
+                        "cookie_header": "",
+                        "preferred_web": MC_HOST,
+                        "error": str(e),
+                        "page_url": "",
+                        "cookie_names": [],
+                    }
                 job.probe_count = int(job.probe_count or 0) + 1
                 job.page_url = str(probe.get("page_url") or "")
                 names = probe.get("cookie_names") or []
                 if isinstance(names, list):
                     job.cookie_names = ",".join(str(x) for x in names[:15])
                 session = probe.get("session") if probe.get("ok") else None
+                cookie_header = str(probe.get("cookie_header") or "")
+                preferred_web = str(probe.get("preferred_web") or MC_HOST)
                 if session:
-                    log(f"session cookie found via {probe.get('method')} page={job.page_url}")
+                    log(
+                        f"session cookie found via {probe.get('method')} page={job.page_url} "
+                        f"web={preferred_web} cookie_header_len={len(cookie_header)}"
+                    )
                     break
                 detail = str(probe.get("error") or "")
                 # refresh UI every few probes
@@ -709,7 +795,15 @@ class ManualAuthManager:
                 return
 
             self._set(job, "minting", "已检测到登录，正在签发凭证并入库…")
-            result = self.mint_callback(session)
+            # Pass full cookie jar so Cloudflare/WAF cookies are included (fixes 401 on Windows)
+            result = self.mint_callback(
+                {
+                    "session": session,
+                    "cookie_header": cookie_header or f"{COOKIE_NAME}={session}",
+                    "preferred_web": preferred_web,
+                    "page_url": job.page_url,
+                }
+            )
             account = result.get("account") or {}
             user = result.get("user") or {}
             email = account.get("email") or user.get("email") or ""
