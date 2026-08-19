@@ -1373,6 +1373,74 @@ def mint_from_session(session_or_payload: Any = "", **kwargs: Any) -> Dict[str, 
     raise RuntimeError(f"mint failed on all hosts: {last_err}")
 
 
+def test_account_connection(
+    account_id: int,
+    model: str = "deepseek-v4-flash",
+    prompt: str = "hi",
+) -> Dict[str, Any]:
+    """Probe a single pool account against its own base_url (for admin UI test modal)."""
+    acc = get_account(int(account_id))
+    if not acc:
+        raise KeyError("account not found")
+    model = normalize_model(str(model or "deepseek-v4-flash"))
+    prompt = (prompt or "hi").strip() or "hi"
+    body: Dict[str, Any] = {
+        "model": model,
+        "max_tokens": 32,
+        "stream": False,
+        "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
+    }
+    t0 = now()
+    base = (acc.get("base_url") or UPSTREAM_DEFAULT).rstrip("/")
+    status, hdrs, data = upstream_messages(acc, body, stream=False)
+    latency = int((now() - t0) * 1000)
+    raw = data if isinstance(data, (bytes, bytearray)) else b""
+    if not isinstance(data, (bytes, bytearray)):
+        try:
+            raw = data.read()
+            data.close()
+        except Exception:
+            raw = b""
+    text = raw.decode("utf-8", "replace") if raw else ""
+    preview = ""
+    ok = 200 <= int(status) < 300
+    if ok:
+        try:
+            obj = json.loads(text)
+            # anthropic message content
+            parts = []
+            for c in (obj.get("content") or []):
+                if isinstance(c, dict) and c.get("type") == "text":
+                    parts.append(str(c.get("text") or ""))
+                elif isinstance(c, dict) and c.get("type") == "thinking":
+                    # skip thinking noise for short preview
+                    pass
+            preview = "\n".join(p for p in parts if p).strip()
+            if not preview:
+                preview = text[:400]
+        except Exception:
+            preview = text[:400]
+        mark_account_success(int(account_id))
+    else:
+        mark_account_failure(int(account_id), text[:300], int(status))
+        preview = text[:500] or f"HTTP {status}"
+    return {
+        "ok": ok,
+        "account_id": int(account_id),
+        "email": acc.get("email") or "",
+        "label": acc.get("label") or "",
+        "enabled": bool(acc.get("enabled")),
+        "base_url": base,
+        "model": model,
+        "prompt": prompt,
+        "status": int(status),
+        "latency_ms": latency,
+        "api_key_preview": (acc.get("api_key") or "")[:12] + "…",
+        "preview": preview,
+        "raw": text[:2000],
+    }
+
+
 def upstream_messages(account: Dict[str, Any], body: Dict[str, Any], stream: bool):
     """Single upstream call using account.base_url (set correctly at mint time). No 401 retry fan-out."""
     sign_text = ensure_system(body)
@@ -1906,7 +1974,20 @@ class Handler(BaseHTTPRequestHandler):
                     url=body.get("url") if "url" in body else None,
                 )
                 return self._send_json(200, {"ok": bool(result.get("ok")), "result": result})
+            # POST /admin/api/accounts/{id}/test
+            if path.startswith("/admin/api/accounts/") and path.endswith("/test"):
+                mid = path[len("/admin/api/accounts/") : -len("/test")]
+                aid = int(mid)
+                body = body if isinstance(body, dict) else {}
+                result = test_account_connection(
+                    aid,
+                    model=str(body.get("model") or "deepseek-v4-flash"),
+                    prompt=str(body.get("prompt") or body.get("message") or "hi"),
+                )
+                return self._send_json(200, {"ok": bool(result.get("ok")), "result": result})
             self._send_json(404, {"error": "not found"})
+        except KeyError as e:
+            return self._send_json(404, {"error": str(e) or "not found"})
         except Exception as e:
             return self._send_json(400, {"error": str(e)})
 

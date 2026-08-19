@@ -235,6 +235,66 @@
     align-items: start;
   }
 
+  /* account test modal */
+  .modal-mask {
+    position: fixed; inset: 0; z-index: 50;
+    background: color-mix(in oklab, #000 45%, transparent);
+    display: none; align-items: center; justify-content: center;
+    padding: 16px;
+  }
+  .modal-mask.is-open { display: flex; }
+  .modal {
+    width: min(480px, 100%);
+    background: var(--card); color: var(--card-foreground);
+    border: 1px solid var(--border); border-radius: 14px;
+    box-shadow: 0 18px 50px color-mix(in oklab, #000 28%, transparent);
+    overflow: hidden;
+  }
+  .modal-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 16px; border-bottom: 1px solid var(--border);
+  }
+  .modal-title { margin: 0; font-size: 15px; font-weight: 600; }
+  .modal-x {
+    width: 28px; height: 28px; border: 0; border-radius: 8px;
+    background: transparent; color: var(--muted-foreground); cursor: pointer; font-size: 16px;
+  }
+  .modal-x:hover { background: var(--accent); color: var(--foreground); }
+  .modal-body { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+  .modal-foot {
+    display: flex; justify-content: flex-end; gap: 8px;
+    padding: 12px 16px 16px; border-top: 1px solid var(--border);
+  }
+  .test-acc-card {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 12px; border-radius: 10px;
+    background: var(--background); border: 1px solid var(--border);
+  }
+  .test-acc-icon {
+    width: 36px; height: 36px; border-radius: 10px; flex-shrink: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: color-mix(in oklab, var(--success) 18%, transparent);
+    color: var(--success); font-size: 14px; font-weight: 700;
+  }
+  .test-acc-meta { min-width: 0; flex: 1; }
+  .test-acc-title { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .test-acc-sub { margin-top: 2px; font-size: 11px; color: var(--muted-foreground); }
+  .test-log {
+    min-height: 140px; max-height: 220px; overflow: auto;
+    border-radius: 10px; padding: 12px;
+    background: #0b0f14; color: #d7e0ea;
+    font-family: var(--mono); font-size: 12px; line-height: 1.55;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .test-log .ok { color: #3dd68c; }
+  .test-log .err { color: #ff6b6b; }
+  .test-log .dim { color: #8b9bb0; }
+  .test-meta-row {
+    display: flex; flex-wrap: wrap; gap: 12px 16px;
+    font-size: 11px; color: var(--muted-foreground);
+  }
+  .field-label { display: block; font-size: 12px; color: var(--muted-foreground); margin-bottom: 6px; }
+
   @media (max-width: 960px) {
     .app { grid-template-columns: 1fr; height: auto; overflow: visible; }
     .sidebar { border-right: 0; border-bottom: 1px solid var(--sidebar-border); }
@@ -468,11 +528,54 @@
   </div>
 </div>
 
+<!-- 测试账号连接 -->
+<div class="modal-mask" id="testModal" aria-hidden="true">
+  <div class="modal" role="dialog" aria-labelledby="testModalTitle">
+    <div class="modal-head">
+      <h3 class="modal-title" id="testModalTitle">测试账号连接</h3>
+      <button type="button" class="modal-x" id="btnTestCloseX" title="关闭">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="test-acc-card">
+        <div class="test-acc-icon">▶</div>
+        <div class="test-acc-meta">
+          <div class="test-acc-title" id="testAccTitle">账号</div>
+          <div class="test-acc-sub"><span class="tag">APIKEY</span> 账号 · <span id="testAccKey">-</span></div>
+        </div>
+        <span class="tag is-on" id="testAccStatus">active</span>
+      </div>
+      <div>
+        <label class="field-label" for="testModel">选择测试模型</label>
+        <select id="testModel">
+          <option value="deepseek-v4-flash">deepseek-v4-flash</option>
+          <option value="deepseek-v4-pro">deepseek-v4-pro</option>
+          <option value="qwen3.5-plus">qwen3.5-plus</option>
+          <option value="glm-5.2">glm-5.2</option>
+          <option value="gpt-5.4">gpt-5.4</option>
+          <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
+        </select>
+      </div>
+      <div class="test-log" id="testLog"><span class="dim">准备测试。点击「开始测试」按钮开始...</span></div>
+      <div class="test-meta-row">
+        <span>测试模型 · <b id="testMetaModel">deepseek-v4-flash</b></span>
+        <span>提示词 · <b id="testMetaPrompt">"hi"</b></span>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button type="button" class="btn btn-outline" id="btnTestClose">关闭</button>
+      <button type="button" class="btn" id="btnTestStart">▶ 开始测试</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const $ = (id) => document.getElementById(id);
 const state = {
   theme: localStorage.getItem('mc_theme') || 'light',
   tab: localStorage.getItem('mc_tab') || 'overview',
+  testAccount: null,
+  testRunning: false,
+  accountsCache: [],
 };
 document.documentElement.classList.toggle('dark', state.theme === 'dark');
 
@@ -616,6 +719,7 @@ async function refresh() {
 
   const tb = $('accBody');
   tb.innerHTML = '';
+  state.accountsCache = acc.items || [];
   for (const a of acc.items || []) {
     const stTag = !a.enabled
       ? '<span class="tag is-off">停用</span>'
@@ -638,6 +742,7 @@ async function refresh() {
       <td class="muted">fail ${a.fail_count || 0}<div>${escapeHtml(a.last_error || '')}</div></td>
       <td>
         <div class="actions">
+          <button class="btn btn-outline" data-act="test" data-id="${a.id}" type="button">测试</button>
           <button class="btn btn-outline" data-act="toggle" data-id="${a.id}" data-en="${a.enabled ? 0 : 1}" type="button">${a.enabled ? '停用' : '启用'}</button>
           <button class="btn btn-outline" data-act="reset" data-id="${a.id}" type="button">清冷却</button>
           <button class="btn btn-outline" data-act="conc" data-id="${a.id}" data-mc="${mc}" type="button">并发</button>
@@ -792,12 +897,103 @@ $('btnMint').onclick = async () => {
   }
 };
 
+function openTestModal(account) {
+  state.testAccount = account;
+  const title = [account.label || 'mc', account.email || ('#' + account.id)].filter(Boolean).join(' - ');
+  $('testAccTitle').textContent = title;
+  $('testAccKey').textContent = account.api_key_preview || account.api_key || '-';
+  const st = $('testAccStatus');
+  if (!account.enabled) {
+    st.textContent = 'disabled';
+    st.className = 'tag is-off';
+  } else if (account.in_cooldown) {
+    st.textContent = 'cooldown';
+    st.className = 'tag is-cool';
+  } else {
+    st.textContent = 'active';
+    st.className = 'tag is-on';
+  }
+  $('testModel').value = 'deepseek-v4-flash';
+  $('testMetaModel').textContent = $('testModel').value;
+  $('testMetaPrompt').textContent = '"hi"';
+  $('testLog').innerHTML = '<span class="dim">准备测试。点击「开始测试」按钮开始...</span>';
+  $('btnTestStart').disabled = false;
+  $('testModal').classList.add('is-open');
+  $('testModal').setAttribute('aria-hidden', 'false');
+}
+
+function closeTestModal() {
+  if (state.testRunning) return;
+  $('testModal').classList.remove('is-open');
+  $('testModal').setAttribute('aria-hidden', 'true');
+  state.testAccount = null;
+}
+
+function appendTestLog(html) {
+  const el = $('testLog');
+  const line = document.createElement('div');
+  line.innerHTML = html;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+
+$('testModel').onchange = () => {
+  $('testMetaModel').textContent = $('testModel').value;
+};
+
+$('btnTestClose').onclick = () => closeTestModal();
+$('btnTestCloseX').onclick = () => closeTestModal();
+$('testModal').addEventListener('click', (ev) => {
+  if (ev.target === $('testModal')) closeTestModal();
+});
+
+$('btnTestStart').onclick = async () => {
+  const acc = state.testAccount;
+  if (!acc || state.testRunning) return;
+  const model = $('testModel').value || 'deepseek-v4-flash';
+  const prompt = 'hi';
+  state.testRunning = true;
+  $('btnTestStart').disabled = true;
+  $('testLog').innerHTML = '';
+  appendTestLog('<span class="dim">▶ 开始测试账号 #' + acc.id + ' ...</span>');
+  appendTestLog('<span class="dim">模型: ' + escapeHtml(model) + ' · 提示词: "hi"</span>');
+  appendTestLog('<span class="dim">上游: ' + escapeHtml(acc.base_url || '(default)') + '</span>');
+  try {
+    const r = await api('/admin/api/accounts/' + acc.id + '/test', {
+      method: 'POST',
+      body: JSON.stringify({ model, prompt }),
+    });
+    const res = r.result || {};
+    if (res.ok) {
+      appendTestLog('<span class="ok">✓ 连接成功 · HTTP ' + res.status + ' · ' + (res.latency_ms || 0) + 'ms</span>');
+      appendTestLog('<span class="dim">base_url: ' + escapeHtml(res.base_url || '') + '</span>');
+      appendTestLog('<span class="ok">回复预览:</span>\n' + escapeHtml(res.preview || '(empty)'));
+    } else {
+      appendTestLog('<span class="err">✗ 连接失败 · HTTP ' + (res.status || '-') + ' · ' + (res.latency_ms || 0) + 'ms</span>');
+      appendTestLog('<span class="dim">base_url: ' + escapeHtml(res.base_url || '') + '</span>');
+      appendTestLog('<span class="err">' + escapeHtml(res.preview || res.raw || 'unknown error') + '</span>');
+    }
+  } catch (e) {
+    appendTestLog('<span class="err">✗ 请求异常: ' + escapeHtml(String(e)) + '</span>');
+  } finally {
+    state.testRunning = false;
+    $('btnTestStart').disabled = false;
+    refresh().catch(() => {});
+  }
+};
+
 $('accBody').onclick = async (ev) => {
   const btn = ev.target.closest('button[data-act]');
   if (!btn) return;
   const id = btn.dataset.id;
   const act = btn.dataset.act;
   try {
+    if (act === 'test') {
+      const acc = (state.accountsCache || []).find((x) => String(x.id) === String(id));
+      if (!acc) throw new Error('账号不存在，请刷新列表');
+      openTestModal(acc);
+      return;
+    }
     if (act === 'del') {
       if (!confirm('确认删除账号 #' + id + '？')) return;
       await api('/admin/api/accounts/' + id, { method: 'DELETE' });
