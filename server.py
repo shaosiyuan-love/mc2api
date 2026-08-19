@@ -29,6 +29,13 @@ PORT = int(os.environ.get("MC_CONSOLE_PORT", "18095"))
 UPSTREAM_DEFAULT = os.environ.get(
     "MC_CONSOLE_UPSTREAM", "https://proxy.monkeycode-ai.net/v1"
 ).rstrip("/")
+# Token 来自哪个控制台域名，就固定走对应上游（不要每次 401 再猜）
+UPSTREAM_COM = os.environ.get(
+    "MC_CONSOLE_UPSTREAM_COM", "https://proxy.monkeycode-ai.com/v1"
+).rstrip("/")
+UPSTREAM_NET = os.environ.get(
+    "MC_CONSOLE_UPSTREAM_NET", "https://proxy.monkeycode-ai.net/v1"
+).rstrip("/")
 DEFAULT_SYSTEM = os.environ.get("MC_CONSOLE_DEFAULT_SYSTEM", "You are a helpful assistant.")
 ADMIN_TOKEN_ENV = os.environ.get("MC_CONSOLE_ADMIN_TOKEN", "").strip()
 ADMIN_TOKEN_FILE = DATA_DIR / "admin_token.txt"
@@ -48,6 +55,21 @@ MC_WEB_FALLBACKS = [
 ]
 _mc_web_seen = set()
 MC_WEB_HOSTS = [h for h in MC_WEB_FALLBACKS if not (h in _mc_web_seen or _mc_web_seen.add(h))]
+
+
+def upstream_base_for_web(web_or_page: str = "") -> str:
+    """Map mint/login domain → fixed upstream proxy. No per-request guessing."""
+    s = (web_or_page or "").strip().lower()
+    if "monkeycode-ai.com" in s:
+        return UPSTREAM_COM
+    if "monkeycode-ai.net" in s:
+        return UPSTREAM_NET
+    # bare hints
+    if s.endswith(".com") or "/.com" in s:
+        return UPSTREAM_COM
+    if s.endswith(".net") or "/.net" in s:
+        return UPSTREAM_NET
+    return UPSTREAM_DEFAULT
 
 MODEL_ALIASES = {
     "deepseek-v4-flash": "monkeycode-basic/deepseek-v4-flash",
@@ -1233,29 +1255,41 @@ def mint_from_session(session_or_payload: Any = "", **kwargs: Any) -> Dict[str, 
         user = session_or_payload.get("user") or {}
         if not isinstance(user, dict):
             user = {}
+        # Correct upstream by mint domain (page_url / preferred_web), not default-only
+        origin_hint = (
+            str(session_or_payload.get("page_url") or "")
+            or str(session_or_payload.get("preferred_web") or "")
+            or str(session_or_payload.get("web") or "")
+        )
+        base_url = upstream_base_for_web(origin_hint)
         account = upsert_account(
             {
                 "label": user.get("name") or "",
                 "email": user.get("email") or "",
                 "api_key": api_key,
                 "signing_secret": signing_secret,
-                "base_url": UPSTREAM_DEFAULT,
+                "base_url": base_url,
                 "enabled": True,
             }
         )
-        log(f"mint upsert pre_minted email={account.get('email') or ''} id={account.get('id')}")
+        log(
+            f"mint upsert pre_minted email={account.get('email') or ''} id={account.get('id')} "
+            f"origin={origin_hint!r} base_url={base_url}"
+        )
         return {
             "user": user,
             "key_id": session_or_payload.get("key_id"),
             "account": account,
-            "web": "in-page",
+            "web": origin_hint or "in-page",
             "mint_via": "browser-cdp",
+            "base_url": base_url,
         }
 
     p = _normalize_mint_payload(session_or_payload, **kwargs)
     session = p["session"]
     cookie_header = p["cookie_header"]
     preferred_web = p["preferred_web"]
+    page_url = p.get("page_url") or ""
     if not session and not cookie_header:
         raise ValueError("session empty")
 
@@ -1308,21 +1342,30 @@ def mint_from_session(session_or_payload: Any = "", **kwargs: Any) -> Dict[str, 
             data = (created or {}).get("data") or {}
             if not data.get("api_key") or not data.get("signing_secret"):
                 raise RuntimeError("mint failed: " + json.dumps(created, ensure_ascii=False)[:300])
+            # Fix type by mint host: .com token → .com proxy, .net → .net proxy
+            base_url = upstream_base_for_web(web or page_url or preferred_web)
             account = upsert_account(
                 {
                     "label": user.get("name") or "",
                     "email": user.get("email") or "",
                     "api_key": data["api_key"],
                     "signing_secret": data["signing_secret"],
-                    "base_url": UPSTREAM_DEFAULT,
+                    "base_url": base_url,
                     "enabled": True,
                 }
             )
             log(
                 f"mint ok via {web} email={account.get('email') or ''} "
+                f"base_url={base_url} "
                 f"cookie_names={len(cookie_header.split(';'))} session_len={len(session)}"
             )
-            return {"user": user, "key_id": data.get("id"), "account": account, "web": web}
+            return {
+                "user": user,
+                "key_id": data.get("id"),
+                "account": account,
+                "web": web,
+                "base_url": base_url,
+            }
         except Exception as e:
             last_err = str(e)
             log(f"mint via {web} failed: {e}")
@@ -1331,10 +1374,13 @@ def mint_from_session(session_or_payload: Any = "", **kwargs: Any) -> Dict[str, 
 
 
 def upstream_messages(account: Dict[str, Any], body: Dict[str, Any], stream: bool):
+    """Single upstream call using account.base_url (set correctly at mint time). No 401 retry fan-out."""
     sign_text = ensure_system(body)
     body["model"] = normalize_model(str(body.get("model") or ""))
     payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
-    url = (account.get("base_url") or UPSTREAM_DEFAULT).rstrip("/") + "/messages"
+    base = (account.get("base_url") or UPSTREAM_DEFAULT).rstrip("/")
+    url = base + "/messages"
+    key_prefix = (account.get("api_key") or "")[:14]
     headers = {
         "Content-Type": "application/json",
         "Accept": "text/event-stream" if stream else "application/json",
@@ -1344,16 +1390,32 @@ def upstream_messages(account: Dict[str, Any], body: Dict[str, Any], stream: boo
         "anthropic-version": "2023-06-01",
         "X-OhMyAgent-Signature": sign_system(account["signing_secret"], sign_text),
     }
+    log(
+        f"upstream_messages account_id={account.get('id')} key={key_prefix}… "
+        f"base_url={base} model={body.get('model')} sign_len={len(sign_text)}"
+    )
     req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
     try:
         resp = http_open(req, timeout=REQUEST_TIMEOUT)
         return resp.status, dict(resp.headers.items()), resp
     except urllib.error.HTTPError as e:
         raw = e.read()
+        log(
+            f"upstream_messages HTTP {e.code} account_id={account.get('id')} "
+            f"base_url={base} key={key_prefix}… body={raw[:200]!r}"
+        )
         return e.code, dict(e.headers.items()), raw
     except Exception as e:
+        log(f"upstream_messages connect fail account_id={account.get('id')} base_url={base}: {e}")
         return 502, {"Content-Type": "application/json"}, json.dumps(
-            {"error": {"message": f"upstream connect failed: {e}", "type": "upstream_error"}}
+            {
+                "error": {
+                    "message": f"upstream connect failed ({base}): {e}",
+                    "type": "upstream_error",
+                    "account_id": account.get("id"),
+                    "base_url": base,
+                }
+            }
         ).encode()
 
 
