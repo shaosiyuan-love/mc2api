@@ -93,6 +93,20 @@ def log(msg: str) -> None:
         pass
 
 
+def log_block(title: str, text: str) -> None:
+    """Multi-line dump into server.log (and stdout)."""
+    bar = "=" * 72
+    block = f"[mc2api] {bar}\n[mc2api] {title}\n{text.rstrip()}\n[mc2api] {bar}"
+    print(block, flush=True)
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with _log_file_lock:
+            with open(DATA_DIR / "server.log", "a", encoding="utf-8") as fp:
+                fp.write(block + "\n")
+    except Exception:
+        pass
+
+
 def now() -> float:
     return time.time()
 
@@ -1351,8 +1365,14 @@ class Handler(BaseHTTPRequestHandler):
         log(f"{self.address_string()} {fmt % args}")
 
     def _read_body(self) -> bytes:
+        # Cache: body stream can be read only once
+        cached = getattr(self, "_cached_body", None)
+        if cached is not None:
+            return cached
         n = int(self.headers.get("Content-Length") or 0)
-        return self.rfile.read(n) if n else b""
+        raw = self.rfile.read(n) if n else b""
+        self._cached_body = raw
+        return raw
 
     def _read_json(self) -> Dict[str, Any]:
         raw = self._read_body()
@@ -1360,8 +1380,101 @@ class Handler(BaseHTTPRequestHandler):
             return {}
         return json.loads(raw.decode("utf-8"))
 
+    def _dump_incoming_request(self, where: str, *, include_body: bool = True) -> None:
+        """Full request dump for debugging client 401 / path issues."""
+        try:
+            raw_path = self.path
+            norm = self._normalize_path(urlparse(raw_path).path)
+            headers_map: Dict[str, str] = {}
+            for k, v in self.headers.items():
+                headers_map[str(k)] = str(v)
+            # stable order
+            header_lines = "\n".join(f"  {k}: {v}" for k, v in sorted(headers_map.items(), key=lambda x: x[0].lower()))
+            token = self._parse_auth_token()
+            body_txt = ""
+            body_len = 0
+            if include_body and self.command in ("POST", "PUT", "PATCH"):
+                raw = self._read_body()
+                body_len = len(raw)
+                # hard cap to avoid multi-MB paste blowing disk
+                max_n = int(os.environ.get("MC_CONSOLE_LOG_BODY_MAX", "200000"))
+                if body_len > max_n:
+                    body_txt = raw[:max_n].decode("utf-8", "replace") + f"\n... [truncated body {body_len} bytes, max={max_n}]"
+                else:
+                    body_txt = raw.decode("utf-8", "replace") if raw else ""
+                # pretty json if possible
+                if body_txt.strip().startswith(("{", "[")):
+                    try:
+                        body_txt = json.dumps(json.loads(body_txt), ensure_ascii=False, indent=2)
+                    except Exception:
+                        pass
+            lines = [
+                f"time: {iso()}",
+                f"client: {self.address_string()}",
+                f"where: {where}",
+                f"method: {self.command}",
+                f"raw_path: {raw_path}",
+                f"normalized_path: {norm}",
+                f"http_version: {self.request_version}",
+                f"parsed_api_key: {token!r}",
+                f"parsed_api_key_len: {len(token) if token else 0}",
+                "headers:",
+                header_lines or "  (none)",
+            ]
+            if include_body and self.command in ("POST", "PUT", "PATCH"):
+                lines.append(f"body_bytes: {body_len}")
+                lines.append("body:")
+                lines.append(body_txt if body_txt != "" else "  (empty)")
+            log_block(f"FULL REQUEST [{self.command} {norm}]", "\n".join(lines))
+        except Exception as e:
+            log(f"dump request failed: {e}")
+
+    def _dump_auth_result(self, ok: bool, detail: str = "", client: Optional[Dict[str, Any]] = None) -> None:
+        token = self._parse_auth_token()
+        info = {
+            "ok": ok,
+            "detail": detail,
+            "token": token,
+            "token_len": len(token) if token else 0,
+            "client_key_id": (client or {}).get("id"),
+            "client_key_name": (client or {}).get("name"),
+            "path": self.path,
+        }
+        log_block("AUTH RESULT", json.dumps(info, ensure_ascii=False, indent=2))
+
+    def _dump_response(self, code: int, body: bytes, content_type: str = "") -> None:
+        max_n = int(os.environ.get("MC_CONSOLE_LOG_BODY_MAX", "200000"))
+        raw = body or b""
+        text = raw[:max_n].decode("utf-8", "replace")
+        if len(raw) > max_n:
+            text += f"\n... [truncated response {len(raw)} bytes]"
+        if text.strip().startswith(("{", "[")):
+            try:
+                text = json.dumps(json.loads(text), ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+        log_block(
+            f"FULL RESPONSE [{code} {self.command} {self.path}]",
+            "\n".join(
+                [
+                    f"status: {code}",
+                    f"content_type: {content_type}",
+                    f"body_bytes: {len(raw)}",
+                    "body:",
+                    text if text != "" else "  (empty)",
+                ]
+            ),
+        )
+
     def _send(self, code: int, body: bytes, content_type: str = "application/json",
               extra_headers: Optional[Dict[str, str]] = None) -> None:
+        # Dump gateway responses fully when debug path
+        try:
+            p = self._normalize_path(urlparse(self.path).path)
+            if p.startswith("/v1") or p in ("/messages", "/chat/completions", "/models"):
+                self._dump_response(code, body, content_type)
+        except Exception:
+            pass
         self.send_response(code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
@@ -1711,9 +1824,13 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def _gateway_models(self) -> None:
+        self._dump_incoming_request("gateway_models", include_body=False)
         try:
-            auth_client_key(self._parse_auth_token())
+            client = auth_client_key(self._parse_auth_token())
+            self._dump_auth_result(True, "ok", client)
         except PermissionError as e:
+            self._dump_auth_result(False, str(e))
+            log_request(None, None, self._normalize_path(urlparse(self.path).path), "", 401, 0, str(e))
             return self._send_json(401, {"error": {"message": str(e), "type": "auth_error"}})
         ids = list(dict.fromkeys(list(MODEL_ALIASES.keys()) + list(MODEL_ALIASES.values())))
         self._send_json(200, {
@@ -1732,23 +1849,31 @@ class Handler(BaseHTTPRequestHandler):
 
     def _gateway_messages(self) -> None:
         t0 = now()
+        self._dump_incoming_request("gateway_messages", include_body=True)
         client = None
         lease = None
+        path = "/v1/messages"
         try:
             client = auth_client_key(self._parse_auth_token())
+            self._dump_auth_result(True, "ok", client)
         except PermissionError as e:
+            self._dump_auth_result(False, str(e))
+            log_request(None, None, path, "", 401, int((now() - t0) * 1000), str(e))
             return self._send_json(401, {"error": {"message": str(e), "type": "auth_error"}})
         try:
             body = self._read_json()
         except Exception as e:
+            log_request(client.get("id"), None, path, "", 400, int((now() - t0) * 1000), f"invalid json: {e}")
             return self._send_json(400, {"error": {"message": f"invalid json: {e}"}})
         stream = bool(body.get("stream"))
         model = str(body.get("model") or "")
+        log(f"gateway_messages model={model!r} stream={stream} body_keys={list(body.keys())}")
         try:
             lease = acquire_account(affinity_key=self._affinity_key(client))
             account = lease.account
+            log(f"gateway_messages acquired account_id={account.get('id')} email={account.get('email')}")
         except Exception as e:
-            log_request(client.get("id"), None, "/v1/messages", model, 503, int((now()-t0)*1000), str(e))
+            log_request(client.get("id"), None, path, model, 503, int((now()-t0)*1000), str(e))
             return self._send_json(503, {"error": {"message": str(e), "type": "no_account"}})
 
         try:
@@ -1763,12 +1888,13 @@ class Handler(BaseHTTPRequestHandler):
                     except Exception:
                         err = b""
                 mark_account_failure(int(account["id"]), err.decode("utf-8", "replace")[:300], status)
-                log_request(client.get("id"), account.get("id"), "/v1/messages", model, status, latency, err.decode("utf-8", "replace")[:200])
+                log_request(client.get("id"), account.get("id"), path, model, status, latency, err.decode("utf-8", "replace")[:200])
+                log(f"gateway_messages upstream_error status={status} account_id={account.get('id')} err={err[:300]!r}")
                 ct = hdrs.get("Content-Type") or hdrs.get("content-type") or "application/json"
                 return self._send(status, bytes(err), ct)
 
             mark_account_success(int(account["id"]))
-            log_request(client.get("id"), account.get("id"), "/v1/messages", model, status, latency, "")
+            log_request(client.get("id"), account.get("id"), path, model, status, latency, "")
             if stream and not isinstance(data, (bytes, bytearray)):
                 # keep lease until stream finishes
                 try:
@@ -1789,22 +1915,30 @@ class Handler(BaseHTTPRequestHandler):
 
     def _gateway_chat(self) -> None:
         t0 = now()
+        self._dump_incoming_request("gateway_chat", include_body=True)
         client = None
         lease = None
+        path = "/v1/chat/completions"
         try:
             client = auth_client_key(self._parse_auth_token())
+            self._dump_auth_result(True, "ok", client)
         except PermissionError as e:
+            self._dump_auth_result(False, str(e))
+            log_request(None, None, path, "", 401, int((now() - t0) * 1000), str(e))
             return self._send_json(401, {"error": {"message": str(e), "type": "auth_error"}})
         try:
             body = self._read_json()
         except Exception as e:
+            log_request(client.get("id"), None, path, "", 400, int((now() - t0) * 1000), f"invalid json: {e}")
             return self._send_json(400, {"error": {"message": f"invalid json: {e}"}})
         model = str(body.get("model") or "")
+        log(f"gateway_chat model={model!r} stream={bool(body.get('stream'))} body_keys={list(body.keys())}")
         try:
             lease = acquire_account(affinity_key=self._affinity_key(client))
             account = lease.account
+            log(f"gateway_chat acquired account_id={account.get('id')} email={account.get('email')}")
         except Exception as e:
-            log_request(client.get("id"), None, "/v1/chat/completions", model, 503, int((now()-t0)*1000), str(e))
+            log_request(client.get("id"), None, path, model, 503, int((now()-t0)*1000), str(e))
             return self._send_json(503, {"error": {"message": str(e), "type": "no_account"}})
 
         try:
@@ -1820,7 +1954,8 @@ class Handler(BaseHTTPRequestHandler):
                     except Exception:
                         err = b""
                 mark_account_failure(int(account["id"]), err.decode("utf-8", "replace")[:300], status)
-                log_request(client.get("id"), account.get("id"), "/v1/chat/completions", model, status, latency, err.decode("utf-8", "replace")[:200])
+                log_request(client.get("id"), account.get("id"), path, model, status, latency, err.decode("utf-8", "replace")[:200])
+                log(f"gateway_chat upstream_error status={status} account_id={account.get('id')} err={err[:300]!r}")
                 try:
                     obj = json.loads(err.decode("utf-8", "replace"))
                 except Exception:
@@ -1828,7 +1963,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json(status, obj)
 
             mark_account_success(int(account["id"]))
-            log_request(client.get("id"), account.get("id"), "/v1/chat/completions", model, status, latency, "")
+            log_request(client.get("id"), account.get("id"), path, model, status, latency, "")
             out_model = anthropic_body.get("model") or model
             if stream and not isinstance(data, (bytes, bytearray)):
                 return self._stream_openai_from_anthropic(str(out_model), data)
